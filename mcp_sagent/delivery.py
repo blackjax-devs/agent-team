@@ -1,4 +1,4 @@
-"""Peer-message delivery + audit-log writes for blackjax-chat.
+"""Peer-message delivery + audit-log writes for ai-dev-team.
 
 The MCP server runs as a subprocess of ``claude --print``, which is a
 subprocess of ``serve.py``. They are three separate Python processes,

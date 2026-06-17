@@ -2,30 +2,34 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .common import MODEL_SONNET, build_agent
 
+if TYPE_CHECKING:
+    from team_profile import Profile
 
-_ROLE_MD = Path(__file__).with_suffix("").with_name("swe.md")
+
+_ROLE = "swe"
 
 
-def build():
+def build(profile: "Profile"):
     """Construct the SWE Agent.
 
-    SWE has full code-edit scope across blackjax/, sampling-book/, and
-    tuningfork/ (excluding tuningfork/experiments/, which is reserved
-    for the statistician). Tool set covers reading, editing, running
+    SWE has full code-edit scope across the workspace (excluding the
+    statistician's sandbox). Tool set covers reading, editing, running
     tests, and coordinating with peers via the plugin's MCP server
     (``mcp__sagent_chat__sagent_send``).
 
-    Model: sonnet (see ``project/.claude/agents/swe.md`` model: sonnet).
+    Model + system prompt come from the loaded profile.
     """
+    from team_profile import render_prompt
+
     from sagent import tools
 
     return build_agent(
-        role_name="swe",
-        role_md_path=_ROLE_MD,
+        role_name=_ROLE,
+        system=render_prompt(profile, _ROLE),
         tools=[
             tools.Read(),
             tools.Edit(),
@@ -34,5 +38,7 @@ def build():
             tools.Grep(),
             tools.Glob(),
         ],
-        model_id=MODEL_SONNET,
+        model_id=profile.models.get(_ROLE, MODEL_SONNET),
+        session_namespace=profile.session_id_namespace,
+        peers=profile.roster,
     )

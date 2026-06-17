@@ -1,43 +1,33 @@
 """Statistician role factory.
 
-Sandbox: ``tuningfork/experiments/``. Resolved from the monorepo root
-detected at build time so the same role module works on any host that
-has the standard layout (``blackjax-devs/{blackjax,sampling-book,
-tuningfork,claude-config}``).
+Sandbox: ``profile.sandbox_root`` (from the profile's ``[workspace]``
+table). Read-anywhere; Edit/Write are restricted to the sandbox root via
+the wrappers in ``sandboxed_tools.py``.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .common import MODEL_OPUS, build_agent
 
-
-_ROLE_MD = Path(__file__).with_suffix("").with_name("statistician.md")
-
-
-def _monorepo_root() -> Path:
-    """Find the BlackJAX monorepo root by walking up from this file.
-
-    Layout: ``<monorepo>/claude-config/sagent-channel/roles/statistician.py``.
-    Walking up 3 levels lands at the monorepo root (``blackjax-devs/``).
-    (Phase-2 note: replace this fixed depth with an env/marker lookup so
-    the channel is relocatable; Phase 1 just fixes the integer.)
-    """
-    return Path(__file__).resolve().parents[3]
+if TYPE_CHECKING:
+    from team_profile import Profile
 
 
-def _sandbox_root() -> Path:
-    return _monorepo_root() / "tuningfork" / "experiments"
+_ROLE = "statistician"
 
 
-def build():
+def build(profile: "Profile"):
     """Construct the Statistician Agent.
 
-    Read-anywhere. Edit/Write restricted to ``tuningfork/experiments/``
+    Read-anywhere. Edit/Write restricted to ``profile.sandbox_root``
     via sandboxed tool wrappers (see ``sandboxed_tools.py``).
+    Model + system prompt come from the loaded profile.
     """
-    import sys
+    from team_profile import render_prompt
 
     from sagent import tools
 
@@ -46,10 +36,11 @@ def build():
         sys.path.insert(0, plugin_dir)
     import sandboxed_tools
 
-    sandbox = _sandbox_root()
+    sandbox = profile.sandbox_root
+    sandbox.mkdir(parents=True, exist_ok=True)
     return build_agent(
-        role_name="statistician",
-        role_md_path=_ROLE_MD,
+        role_name=_ROLE,
+        system=render_prompt(profile, _ROLE),
         tools=[
             tools.Read(),
             tools.Grep(),
@@ -60,5 +51,7 @@ def build():
             sandboxed_tools.SandboxedWrite(sandbox_root=sandbox),
             sandboxed_tools.SandboxedEdit(sandbox_root=sandbox),
         ],
-        model_id=MODEL_OPUS,
+        model_id=profile.models.get(_ROLE, MODEL_OPUS),
+        session_namespace=profile.session_id_namespace,
+        peers=profile.roster,
     )

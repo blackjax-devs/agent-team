@@ -6,22 +6,30 @@ Same edit scope and tool set as senior SWE, but capped at
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .common import MODEL_HAIKU, build_agent
 
+if TYPE_CHECKING:
+    from team_profile import Profile
 
-_ROLE_MD = Path(__file__).with_suffix("").with_name("junior-swe.md")
+
+_ROLE = "junior-swe"
 _MAX_ROUNDS_BEFORE_ESCALATION = 20
 
 
-def build():
-    """Construct the Junior-SWE Agent."""
+def build(profile: "Profile"):
+    """Construct the Junior-SWE Agent.
+
+    Model + system prompt come from the loaded profile.
+    """
+    from team_profile import render_prompt
+
     from sagent import tools
 
     return build_agent(
-        role_name="junior-swe",
-        role_md_path=_ROLE_MD,
+        role_name=_ROLE,
+        system=render_prompt(profile, _ROLE),
         tools=[
             tools.Read(),
             tools.Edit(),
@@ -30,6 +38,8 @@ def build():
             tools.Grep(),
             tools.Glob(),
         ],
-        model_id=MODEL_HAIKU,
+        model_id=profile.models.get(_ROLE, MODEL_HAIKU),
+        session_namespace=profile.session_id_namespace,
+        peers=profile.roster,
         max_tool_call_rounds=_MAX_ROUNDS_BEFORE_ESCALATION,
     )

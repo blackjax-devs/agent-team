@@ -1,8 +1,8 @@
 """Live serve: bring up all 5 agents + an HTTP/web viewer on 127.0.0.1.
 
-Run from the plugin root:
+Run from the repo root:
 
-    python examples/blackjax-ai-devs-channel/bin/serve.py [--port 8767] [--host 127.0.0.1]
+    python bin/serve.py [--port 8767] [--host 127.0.0.1]
 
 What this does
 --------------
@@ -68,7 +68,7 @@ _MAIN_JSONL = delivery.MAIN_JSONL_PATH
 # window. Path must match :data:`mcp_sagent.server._SUPPRESS_FLAG`.
 _SUPPRESS_FLAG = delivery.SESSIONS_DIR / "_suppress_audit"
 
-_LOG = logging.getLogger("blackjax_chat.serve")
+_LOG = logging.getLogger("ai_dev_team.serve")
 
 
 # --------------------------------------------------------------------------
@@ -76,37 +76,51 @@ _LOG = logging.getLogger("blackjax_chat.serve")
 # --------------------------------------------------------------------------
 
 
-def _build_all_agents():
-    """Construct + return the 5 role agents, each marked persistent + registered.
-
-    Each agent's ``claude --print`` subprocess is wired via
-    ``--mcp-config`` to the plugin's MCP server with ``SAGENT_ROLE=<label>``
-    in the server's env — the sagent_send/sagent_defer/sagent_self tools
-    appear in the catalog as ``mcp__sagent_chat__*`` and are the only path
-    for peer messaging. No ``MentionRouter`` or ``DeferRouter``
-    observer is installed; the prose-fallback machinery from the
-    previous attempt is replaced by structural tool calls.
-    """
+# Maps a profile roster label to its per-role ``build(profile)`` factory.
+# The roster (and thus which subset of these is instantiated) is driven
+# entirely by the profile; a single-label roster yields a team of one.
+def _role_builders() -> dict:
     from roles.junior_swe import build as build_junior
     from roles.statistician import build as build_stat
     from roles.swe import build as build_swe
     from roles.tech_writer import build as build_tw
     from roles.tl import build as build_tl
-    from runtime import trace_writer
 
-    from sagent.testing import FakeAgent
-    from sagent.tools.core import agent_registry
-
-    builders = {
+    return {
         "tl": build_tl,
         "swe": build_swe,
         "junior-swe": build_junior,
         "statistician": build_stat,
         "tech-writer": build_tw,
     }
+
+
+def _build_all_agents(profile):
+    """Construct + return the roster's role agents, each persistent + registered.
+
+    Only the roles in ``profile.roster`` are instantiated (1..N). Each
+    agent's ``claude --print`` subprocess is wired via ``--mcp-config`` to
+    the plugin's MCP server with ``SAGENT_ROLE=<label>`` in the server's
+    env — the sagent_send/sagent_defer/sagent_self tools appear in the
+    catalog as ``mcp__sagent_chat__*`` and are the only path for peer
+    messaging. A single-role roster boots fine: there are simply no peers
+    to address (only ``user``).
+    """
+    from runtime import trace_writer
+
+    from sagent.testing import FakeAgent
+    from sagent.tools.core import agent_registry
+
+    builders = _role_builders()
     agents = {}
-    for label, builder in builders.items():
-        agent = builder()
+    for label in profile.roster:
+        builder = builders.get(label)
+        if builder is None:
+            raise ValueError(
+                f"roster references unknown role {label!r}; "
+                f"known roles: {sorted(builders)}"
+            )
+        agent = builder(profile)
         agent._persistent = True
         agent_registry[label] = agent
         trace_writer.install_on(agent, label)
@@ -606,16 +620,10 @@ def _build_http_app(agents):
     from starlette.responses import HTMLResponse, JSONResponse, Response
     from starlette.routing import Route
 
-    # Static role labels mirror chat/chat:39-42's ``KNOWN_ROLES``.
-    _KNOWN_ROLES = [
-        "user",
-        "tl",
-        "swe",
-        "junior-swe",
-        "statistician",
-        "tech-writer",
-        "system",
-    ]
+    # Role labels are derived from the live roster (``agents``) rather than
+    # hardcoded, so a profile with a 1..N roster reports exactly its members.
+    # ``user`` + ``system`` are the always-present non-agent endpoints.
+    _KNOWN_ROLES = ["user", *sorted(agents), "system"]
 
     async def index(_request: Request) -> Response:
         if not _INDEX_HTML_PATH.exists():
@@ -1099,7 +1107,17 @@ async def _amain(host: str, port: int) -> int:
     # process; this env var is the only handshake.
     os.environ["SAGENT_HTTP_PORT"] = str(port)
 
-    agents = _build_all_agents()
+    from team_profile import load_profile
+
+    profile = load_profile()
+    _LOG.info(
+        "loaded profile %r (namespace=%s) roster=%s",
+        profile.name,
+        profile.session_id_namespace,
+        profile.roster,
+    )
+
+    agents = _build_all_agents(profile)
     _LOG.info("brought up %d agents: %s", len(agents), sorted(agents))
 
     # Restart-resume: rehydrate each agent's tape from its sagent

@@ -1,4 +1,4 @@
-"""MCP stdio server for blackjax-chat peer messaging.
+"""MCP stdio server for ai-dev-team peer messaging.
 
 This module is the entry point that each agent's ``claude --print``
 subprocess spawns via its ``--mcp-config``. The CLI talks to it over
@@ -136,13 +136,12 @@ async def list_tools() -> list[mcp_types.Tool]:
         mcp_types.Tool(
             name="sagent_send",
             description=(
-                "Send a chat message to a peer agent in the blackjax-chat "
+                "Send a chat message to a peer agent in the team "
                 "channel. Use 'to' for the peer label (e.g. 'swe', 'tl', "
-                "'statistician', 'tech-writer', 'junior-swe', 'user') and "
-                "'content' for the message body. This is the ONLY way to "
-                "deliver a message to a peer — your assistant text is for "
-                "thinking, not for routing. The recipient sees your message "
-                "on their next turn."
+                "'user') and 'content' for the message body. This is the "
+                "ONLY way to deliver a message to a peer — your assistant "
+                "text is for thinking, not for routing. The recipient sees "
+                "your message on their next turn."
             ),
             inputSchema={
                 "type": "object",
@@ -150,8 +149,7 @@ async def list_tools() -> list[mcp_types.Tool]:
                     "to": {
                         "type": "string",
                         "description": (
-                            "Peer label: tl, swe, junior-swe, statistician, "
-                            "tech-writer, or user."
+                            "Peer label of a roster member, or 'user'."
                         ),
                     },
                     "content": {

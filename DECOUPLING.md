@@ -7,6 +7,21 @@ tracks the work to make it a clean, config-driven public library.
 
 Plan of record: `claude-config/project/worklog/decisions/2026-06-17-m2-ai-dev-team-public-library.md`.
 
+## Status (2026-06-17) — core decoupling DONE ✅
+**§1 (profile loader), §2 (all couplings), §3 (roster/single-agent), and the §6
+sanitization sweep are complete + adversarially verified** (`team_profile.py`
+loader; statistician sandbox, session namespace, models, peer list, and role
+prompts all profile-driven; `serve.py` builds only the roster; single-agent
+roster boots). Verified: **0 BlackJAX coupling hits** in framework code
+(`bin/ mcp_sagent/ roles/ runtime/ sandboxed_tools.py web/`); loader + render
++ build + serve-import smoke pass; 20 tests pass. `roles/*.md` moved to
+`profiles/default/roles/*.md` with a `{{workspace}}` template.
+
+**Remaining:** §4 (methodology checklists — public general core + private
+addendum, **incl. routing OOM/machine-specific guidance to private**), §5 (agent
+pack), §6 *packaging restructure* (flat → package + console script), §7 (sample
+app + further prompt generalization), §8 (nightly sagent CI + clean-clone verify).
+
 ## 1. Profile mechanism (the core of M2)
 - [ ] Add a profile loader: read `AI_DEV_TEAM_PROFILE_DIR` → parse `team.toml`
       (`profiles/default/team.toml` defines the schema). Expose roster, models,

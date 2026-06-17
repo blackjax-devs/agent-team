@@ -1,9 +1,10 @@
 """Path-sandboxed wrappers around ``sagent.tools.Write`` and ``sagent.tools.Edit``.
 
 The statistician role is permitted to edit experiment scripts and
-diagnostic notebooks under ``tuningfork/experiments/`` only. Without
-runtime enforcement, the role's prompt-level "do not edit production
-code" instruction is advisory — a misjudgment costs us a production
+diagnostic notebooks under the configured ``sandbox_root`` only (from
+the profile's ``[workspace].sandbox_root``). Without runtime
+enforcement, the role's prompt-level "do not edit production code"
+instruction is advisory — a misjudgment costs us a production
 edit. These wrappers convert the boundary into a structural property
 of the tool dispatch: any attempt to write or edit a path outside the
 configured sandbox root resolves immediately as a ``ToolResult`` with

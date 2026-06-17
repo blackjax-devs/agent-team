@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .common import MODEL_OPUS, build_agent
 
+if TYPE_CHECKING:
+    from team_profile import Profile
 
-_ROLE_MD = Path(__file__).with_suffix("").with_name("tl.md")
+
+_ROLE = "tl"
 
 
-def build():
+def build(profile: "Profile"):
     """Construct the TL Agent.
 
     TL is read-only by scope (no Edit/Write); coordinates by reading
@@ -24,13 +27,15 @@ def build():
     ``mcp_sagent/server.py`` and the per-agent ``--mcp-config``
     threaded by :func:`common.build_agent`.
 
-    Model: opus (see ``project/.claude/agents/tl.md`` model: opus).
+    Model + system prompt come from the loaded profile.
     """
+    from team_profile import render_prompt
+
     from sagent import tools
 
     return build_agent(
-        role_name="tl",
-        role_md_path=_ROLE_MD,
+        role_name=_ROLE,
+        system=render_prompt(profile, _ROLE),
         tools=[
             tools.Read(),
             tools.Grep(),
@@ -39,5 +44,7 @@ def build():
             tools.WebSearch(),
             tools.WebFetch(),
         ],
-        model_id=MODEL_OPUS,
+        model_id=profile.models.get(_ROLE, MODEL_OPUS),
+        session_namespace=profile.session_id_namespace,
+        peers=profile.roster,
     )

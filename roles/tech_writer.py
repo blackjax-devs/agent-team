@@ -1,28 +1,35 @@
 """Tech-writer role factory.
 
-The role label is ``tech-writer`` (hyphenated, matches chat/'s
-convention). The Python module filename uses an underscore because
-Python module names can't contain hyphens; the markdown source file
-stays hyphenated to match the role label.
+The role label is ``tech-writer`` (hyphenated). The Python module
+filename uses an underscore because Python module names can't contain
+hyphens; the role label + its profile prompt file stay hyphenated.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .common import MODEL_HAIKU, build_agent
 
+if TYPE_CHECKING:
+    from team_profile import Profile
 
-_ROLE_MD = Path(__file__).with_suffix("").with_name("tech-writer.md")
+
+_ROLE = "tech-writer"
 
 
-def build():
-    """Construct the Tech-Writer Agent."""
+def build(profile: "Profile"):
+    """Construct the Tech-Writer Agent.
+
+    Model + system prompt come from the loaded profile.
+    """
+    from team_profile import render_prompt
+
     from sagent import tools
 
     return build_agent(
-        role_name="tech-writer",
-        role_md_path=_ROLE_MD,
+        role_name=_ROLE,
+        system=render_prompt(profile, _ROLE),
         tools=[
             tools.Read(),
             tools.Grep(),
@@ -33,5 +40,7 @@ def build():
             tools.WebSearch(),
             tools.WebFetch(),
         ],
-        model_id=MODEL_HAIKU,
+        model_id=profile.models.get(_ROLE, MODEL_HAIKU),
+        session_namespace=profile.session_id_namespace,
+        peers=profile.roster,
     )

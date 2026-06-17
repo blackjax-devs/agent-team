@@ -28,12 +28,22 @@ from sagent.compaction.summary import SummaryCompactor
 from sagent.types.tools import Tool
 
 
-# Per-role model assignments mirror ``claude-config/project/.claude/agents/<role>.md``
-# (the existing Claude Code subagent configs).
+# Optional model-id fallbacks. The authoritative role→model assignment now
+# comes from the loaded profile's ``[models]`` table (``profile.models``);
+# these constants remain only as convenience defaults for callers that build
+# an agent outside a profile context.
 MODEL_OPUS = "claude-opus-4-8"
 MODEL_FABLE = "claude-fable-5"
 MODEL_SONNET = "claude-sonnet-4-6"
 MODEL_HAIKU = "claude-haiku-4-5"
+
+# Fixed UUID namespace for deriving per-role session ids. Combined with the
+# profile's ``session_id_namespace`` string so two deployments don't collide.
+_SESSION_UUID_NAMESPACE = "9e0e2c30-3f7e-4a13-9f5b-1a3a2c4d5e6f"
+# Fallback session-id namespace string when no profile namespace is threaded
+# through. Generic framework default; real deployments always override this
+# via ``profile.session_id_namespace`` (see ``team.toml [team]``).
+_DEFAULT_SESSION_NAMESPACE = "ai-dev-team"
 
 HEAVY_BG_REMINDER = """\
 Operating reminder: if a job is expected to be heavy (memory or CPU), \
@@ -43,13 +53,30 @@ cgroup and your worker survives. Do not put $(...) or $VAR inside any \
 argument starting with `-`; the Bash tool's permission system rejects \
 runtime-determined content there."""
 
-PEER_MESSAGING = """\
+def _peer_messaging(peers: Sequence[str] | None = None) -> str:
+    """Build the peer-messaging reminder, listing the live roster as peers.
+
+    ``peers`` is the active roster (role labels). ``user`` is always appended
+    as an addressable target. When ``peers`` is ``None`` the framework falls
+    back to the historical default roster so the prompt is never empty.
+    """
+    if peers is None:
+        peers = ["tl", "swe", "junior-swe", "statistician", "tech-writer"]
+    known = list(peers)
+    if "user" not in known:
+        known.append("user")
+    known_str = ", ".join(f"`{p}`" for p in known)
+    # Plain ``str.replace`` (not ``str.format``) so the template's literal
+    # ``{to, content}`` / ``{delay_s, body}`` braces survive untouched.
+    return PEER_MESSAGING_TEMPLATE.replace("{{known}}", known_str)
+
+
+PEER_MESSAGING_TEMPLATE = """\
 ## Peer messaging — REQUIRED structural tool calls
 
 This is a multi-agent chat channel. To deliver a message to another \
 agent or to the user, you MUST call **`mcp__sagent_chat__sagent_send`** \
-with `{to, content}`. Known peers: `tl`, `swe`, `junior-swe`, \
-`statistician`, `tech-writer`, `user`.
+with `{to, content}`. Known peers: {{known}}.
 
 **Your assistant text is NOT delivered to anyone.** It is logged \
 only to your own trace and is invisible to peers and the user. \
@@ -88,20 +115,39 @@ check back in N minutes" in text** — that does not schedule \
 anything; the recipient (yourself) never receives a wake-up."""
 
 
-def load_system_prompt(role_md_path: Path) -> str:
-    """Read a role's system-prompt markdown and append the standing reminders.
+def compose_system_prompt(
+    body: str, *, peers: Sequence[str] | None = None
+) -> str:
+    """Append the standing reminders to an already-rendered role prompt body.
+
+    ``body`` is the role's system-prompt text with the ``{{workspace}}`` token
+    already filled (see :func:`team_profile.render_prompt`). ``peers`` is the
+    active roster, used to build the peer-messaging known-peers list.
 
     Two reminders, in order, appended (not prefixed) so the role-specific
     identity + scope text leads the prompt and the reminders sit at a
     stable tail location for visual confirmation:
 
-    1. ``PEER_MESSAGING`` — how to address peers (via MCP tool, not
-       prose). Reinjected every turn so compaction doesn't drop it.
+    1. peer-messaging — how to address peers (via MCP tool, not prose).
+       Reinjected every turn so compaction doesn't drop it.
     2. ``HEAVY_BG_REMINDER`` — systemd-run wrap rule for OOM containment;
        reinjected every turn for the same reason.
     """
-    body = role_md_path.read_text(encoding="utf-8").strip()
-    return f"{body}\n\n---\n\n{PEER_MESSAGING}\n\n---\n\n{HEAVY_BG_REMINDER}"
+    peer_block = _peer_messaging(peers)
+    return f"{body.strip()}\n\n---\n\n{peer_block}\n\n---\n\n{HEAVY_BG_REMINDER}"
+
+
+def load_system_prompt(
+    role_md_path: Path, *, peers: Sequence[str] | None = None
+) -> str:
+    """Back-compat: read a role-prompt markdown file then compose reminders.
+
+    Retained for callers that still pass a path. New callers should render the
+    prompt via :func:`team_profile.render_prompt` and call
+    :func:`compose_system_prompt` directly.
+    """
+    body = role_md_path.read_text(encoding="utf-8")
+    return compose_system_prompt(body, peers=peers)
 
 
 def build_provider():
@@ -172,21 +218,24 @@ def _model_spec_for(model_id: str):
     )
 
 
-def _session_id_for(role_name: str) -> str:
+def _session_id_for(role_name: str, *, namespace: str | None = None) -> str:
     """Stable per-role UUIDv5 (so server restarts ``--resume`` the same
     session rather than orphaning the prior one).
 
-    Uses a fixed-namespace UUIDv5 keyed by ``"blackjax-chat:<role>"`` so
-    the same role always derives the same session_id under the same
-    ``SAGENT_DATA_DIR``. To start fresh, ``rm
-    $HOME/.claude/projects/-<encoded-cwd>/<uuid>.jsonl`` (or use a
-    different ``SAGENT_DATA_DIR`` whose
-    ``CLAUDE_CODE_SKIP_PROMPT_HISTORY`` resets the slate).
+    Uses a fixed UUID namespace combined with the deployment's
+    ``session_id_namespace`` string (from the profile's ``[team]`` table) so
+    the same role under the same deployment always derives the same
+    session_id, while two deployments on the same machine/cwd don't collide.
+    When ``namespace`` is ``None`` the generic framework default
+    (:data:`_DEFAULT_SESSION_NAMESPACE`) is used. To start fresh,
+    ``rm $HOME/.claude/projects/-<encoded-cwd>/<uuid>.jsonl`` (or use a
+    different ``SAGENT_DATA_DIR``).
     """
     import uuid as _uuid
 
-    namespace = _uuid.UUID("9e0e2c30-3f7e-4a13-9f5b-1a3a2c4d5e6f")
-    return str(_uuid.uuid5(namespace, f"blackjax-chat:{role_name}"))
+    ns_str = namespace or _DEFAULT_SESSION_NAMESPACE
+    namespace_uuid = _uuid.UUID(_SESSION_UUID_NAMESPACE)
+    return str(_uuid.uuid5(namespace_uuid, f"{ns_str}:{role_name}"))
 
 
 def _session_dir_for(role_name: str) -> Path:
@@ -206,9 +255,12 @@ def _session_dir_for(role_name: str) -> Path:
 def build_agent(
     *,
     role_name: str,
-    role_md_path: Path,
     tools: Sequence[Tool],
     model_id: str,
+    system: str | None = None,
+    role_md_path: Path | None = None,
+    session_namespace: str | None = None,
+    peers: Sequence[str] | None = None,
     max_tool_call_rounds: int | None = None,
     max_budget_usd: float | None = None,
 ):
@@ -224,12 +276,22 @@ def build_agent(
         role_name: Label used in ``agent_registry`` and as the ``name``
             field on the Agent. Must match the role's label used in
             ``sagent_send(to=...)`` calls from peers.
-        role_md_path: Path to the role's system-prompt markdown.
         tools: Sequence of sagent Tool instances allowed for this role.
             Does NOT include AgentSend or AgentSelf — those live in
             the MCP server (``mcp__sagent_chat__sagent_send``,
             ``mcp__sagent_chat__sagent_self``).
-        model_id: Claude model id.
+        model_id: Claude model id (from ``profile.models[role]``).
+        system: Pre-rendered role-prompt body (``{{workspace}}`` already
+            filled by :func:`team_profile.render_prompt`). The standing
+            reminders are appended here. Mutually exclusive with
+            ``role_md_path``; one of the two must be provided.
+        role_md_path: Back-compat fallback — path to a role-prompt markdown
+            file read directly when ``system`` is not given.
+        session_namespace: Deployment session-id namespace (from
+            ``profile.session_id_namespace``); ``None`` falls back to the
+            historical default.
+        peers: Active roster used to build the peer-messaging known-peers
+            list; ``None`` falls back to the historical default roster.
         max_tool_call_rounds: Per-turn cap; ``None`` for sagent default.
         max_budget_usd: Per-agent USD cap; ``None`` disables.
 
@@ -239,12 +301,19 @@ def build_agent(
     """
     from sagent.agent import Agent
 
+    if system is not None:
+        system_prompt = compose_system_prompt(system, peers=peers)
+    elif role_md_path is not None:
+        system_prompt = load_system_prompt(role_md_path, peers=peers)
+    else:
+        raise ValueError("build_agent requires either 'system' or 'role_md_path'")
+
     provider = build_provider()
     # Stdout-idle timeout for the ``claude`` subprocess transport
     # (Subproc default is 60s). Bumped to 300s to accommodate
-    # long-running synchronous Bash tool calls — e.g. tuningfork's
-    # ``pre-commit run`` (runs ``ty`` over touched files, often
-    # 60-120s), ``uv run python ...`` calibration scripts (JAX
+    # long-running synchronous Bash tool calls — e.g. a project's
+    # ``pre-commit run`` (type-checking / linting touched files, often
+    # 60-120s), ``uv run python ...`` calibration scripts (JIT
     # warmup + compilation can be 60+s), heavy test suites. Without
     # the bump, the transport reads claude's silence during the tool
     # wait as a hang, raises ``SubprocessTransportError``, sagent's
@@ -289,11 +358,11 @@ def build_agent(
             # tape from sagent's own ``session.jsonl``) and feeds only
             # deltas thereafter. The claude-side file is a cache, never
             # parsed back.
-            session_id=_session_id_for(role_name),
+            session_id=_session_id_for(role_name, namespace=session_namespace),
             subprocess_read_timeout_sec=subprocess_read_timeout_sec,
         ),
         model_spec=_model_spec_for(model_id),
-        system=load_system_prompt(role_md_path),
+        system=system_prompt,
         tools=list(tools),
         name=role_name,
         # sagent-owned persistence: writes ``<session_dir>/session.jsonl``
