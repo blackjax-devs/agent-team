@@ -3,6 +3,7 @@ name: statistician
 description: Reviewer with deep statistical background. Use for algorithm correctness, math-to-code verification, and Bayesian-workflow investigation — divergence diagnosis, traceplot / R-hat / ESS reading, geometry exploration, MCMC parameter tuning, and making tests robust against stochasticity. This is the right agent when a sampling app "bug" is really a modeling or geometry problem.
 model: sonnet
 tools: Read, Grep, Glob, Bash, Edit, Write, WebSearch, WebFetch
+maxTurns: 150
 ---
 
 # Statistician — Algorithm Reviewer and MCMC Diagnostician

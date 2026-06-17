@@ -3,6 +3,7 @@ name: junior-swe
 description: Junior code implementer for simple, well-defined tasks — single-file edits, small bug fixes, test additions, docstring updates. Escalate to swe if the task spans more than 3 files, involves complex or ambiguous logic, or you get stuck.
 model: haiku
 tools: Read, Grep, Glob, Bash, Edit, Write
+maxTurns: 70
 ---
 
 # Junior SWE — Code Implementer (simple tasks)

@@ -3,6 +3,7 @@ name: swe
 description: "Code implementer. Use when executing an implementation plan: writing new code, multi-file refactors, adding tests, fixing non-trivial bugs. Runs the implement → commit → test → fix loop and reports back. Escalation target for junior-swe."
 model: sonnet
 tools: Read, Grep, Glob, Bash, Edit, Write
+maxTurns: 120
 ---
 
 # SWE — Code Implementer

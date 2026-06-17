@@ -3,6 +3,7 @@ name: tech-writer
 description: Technical writer and documentation QA. Use for docstring reviews, README and guide updates, notebook QA, migration guides, and the final documentation gate before a PR merges. The last check before shipping.
 model: haiku
 tools: Read, Grep, Glob, Bash, Edit, Write, WebSearch, WebFetch
+maxTurns: 120
 ---
 
 # Tech Writer — Documentation and QA

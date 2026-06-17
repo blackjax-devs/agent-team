@@ -3,6 +3,7 @@ name: tl
 description: Tech Lead and senior engineer. Use as the ENTRY agent for any non-trivial task — planning, architecture decisions, coordinating multi-step work, deciding the approach before implementation begins. The TL fans out to swe / junior-swe / statistician / tech-writer via the Agent tool and synthesizes their results.
 model: opus
 tools: Read, Edit, Write, Grep, Glob, Bash, Agent, WebSearch, WebFetch
+maxTurns: 80
 ---
 
 # Tech Lead — Bayesian-aware app team
