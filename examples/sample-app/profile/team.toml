@@ -1,0 +1,27 @@
+# sample-app profile — a statistician-only debug surface pointed at this example.
+#
+# It REUSES the default profile's role prompt (no duplication): the `prompt`
+# path below resolves relative to THIS profile dir back into profiles/default.
+# Launch from the examples/sample-app dir so [workspace].root = "." picks up
+# model.py as the workspace. See ../../README.md for the exact command.
+
+[team]
+name = "sample-app"
+session_id_namespace = "ai-dev-team-sample-app"
+
+[workspace]
+root = "."                                  # = examples/sample-app (the launch cwd)
+sandbox_root = ".ai-dev-team/sandbox"
+description = "a minimal Python app that uses BlackJAX (see model.py)"
+roster = "statistician-only"                # single-role debug surface
+
+[presets]
+statistician-only = ["statistician"]
+
+[models]
+statistician = "claude-opus-4-8"
+
+[roles.statistician]
+# Reuse the default role prompt instead of copying it here.
+prompt = "../../../profiles/default/roles/statistician.md"
+sandbox = true

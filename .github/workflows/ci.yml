@@ -1,0 +1,55 @@
+name: CI
+
+# Triggers: every push/PR to main, plus a nightly schedule.
+#
+# Why the nightly run exists: sagent is pinned to a git ref (see
+# pyproject.toml -> [tool.uv.sources]), not a released PyPI version, so its
+# API can drift under us between our own commits. The #177 churn
+# (session_id / subprocess_read_timeout_sec on model(), the
+# CancelledError->SIGINT interrupt path) showed that upstream changes can
+# silently break the channel. The nightly job re-runs `uv sync` against the
+# pinned ref and exercises the import smoke + test suite so we catch that
+# drift early instead of at the next feature push.
+#
+# TODO(repin): once sagent ships the merged provider work in a PyPI release
+# (>=0.1.7), drop the git pin in pyproject.toml's [tool.uv.sources] and
+# depend on `sagent>=0.1.7` directly. At that point this nightly job can be
+# relaxed (the API surface stops moving under us).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # 03:17 UTC daily — off the top of the hour to avoid GitHub's cron rush.
+    - cron: "17 3 * * *"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # sagent comes from the git-ref pin in pyproject.toml ([tool.uv.sources]).
+      - name: Sync dependencies
+        run: uv sync
+
+      # pytest is not a project dependency, so bring it in just for the run.
+      - name: Run test suite
+        run: uvx --with-editable . --with pytest pytest -q
+
+      # Framework import smoke: profile load + serve module import.
+      - name: Framework import smoke
+        env:
+          AI_DEV_TEAM_PROFILE_DIR: profiles/default
+        run: |
+          uv run python -c "from team_profile import load_profile; load_profile(); import bin.serve"
