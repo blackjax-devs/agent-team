@@ -40,6 +40,15 @@ once tests pass and the linter is clean.
   The finding/fix lines turn the history into a trail of reasoning, not just a
   log of edits.
 
+## Shell hygiene
+
+Prefer `git -C <dir>` (and a tool's `--directory` / `-C` flag) over
+`cd <dir> && <cmd>`. Chaining `cd … && git …` trips an approval prompt — the
+harness warns that changing directory first can run hooks from the target dir —
+and it shifts your cwd, which bites when the workspace spans multiple repos or
+subdirectories. Use `-C` / `--directory`, or run the commands as separate tool
+calls; never chain `cd && <cmd>`.
+
 ## JAX / BlackJAX best practices
 
 This audience uses BlackJAX, so when you write sampling code:
@@ -82,6 +91,10 @@ command rather than guessing flags.
   in a credible interval) rather than exact float values, and pin the seed.
 - A long full-suite or compiled run should go in the background (pass
   `run_in_background: true`) and be polled — don't block a turn on it.
+- **Before a long run (>~30 min wall — a sweep, a full fit, a benchmark),
+  smoke-test the whole end-to-end flow at small N first.** The heavy compute
+  often succeeds and then the *post-processing* crashes (a missing key, an API
+  mismatch) — hours of wall lost to a 2-minute bug you'd have caught at small N.
 
 ## When you are stuck
 
