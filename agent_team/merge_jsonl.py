@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""Chronologically merge the chat/ and sagent/ main.jsonl logs.
+"""Chronologically read (and optionally merge) the team's jsonl audit log(s).
+
+By default reads the deployment's audit log at ``$SAGENT_DATA_DIR/main.jsonl``
+— the channel's operator posts + inter-agent ``sagent_send`` records, i.e. the
+end-of-day source. Pass explicit paths to merge several logs chronologically.
 
 Usage:
-    python merge_jsonl.py                          # both default paths → stdout
-    python merge_jsonl.py --output merged.jsonl    # write to file
-    python merge_jsonl.py --since 2026-06-01       # only records on/after a date
-    python merge_jsonl.py --runtime sagent         # filter to one runtime
-    python merge_jsonl.py path/a.jsonl path/b.jsonl  # explicit inputs
+    agent-team-merge                           # the SAGENT_DATA_DIR audit log → stdout
+    agent-team-merge --output merged.jsonl     # write to a file
+    agent-team-merge --since 2026-06-01        # only records on/after a date
+    agent-team-merge a/main.jsonl b/main.jsonl # merge explicit inputs
 
-Each emitted record is the original record with one added field:
+Each emitted record is the original ``{ts, from, to, body}`` plus a
+``"source"`` field (the input's tag — its parent dir name, or stem) so
+multi-input merges stay attributable. ``--source`` filters to one tag.
 
-    "runtime": "channel" | "sagent"
-
-so consumers can tell which side produced what. The original record
-shape is otherwise unchanged: ``{ts, from, to, body, [runtime]}``.
-
-Designed for end-of-day routine and ad-hoc forensics — fast, no
-external deps, no in-memory cap other than the OS file open limit.
+Designed for the end-of-day routine and ad-hoc forensics — fast, no external
+deps, no in-memory cap beyond the OS file-open limit.
 """
 
 from __future__ import annotations
@@ -32,21 +32,19 @@ import os
 import sys
 
 
-# Honor SAGENT_DATA_DIR (the same env the running server uses) so the
-# default sagent log path tracks the real audit log. This mirrors
-# ``agent_team.mcp_sagent.delivery._resolve_data_dir``: env var if set,
-# else the launch cwd. The fallback is the cwd (NOT the package install
-# dir, which is read-only site-packages when installed); the legacy tmux
-# ``channel/`` log, when present, lives beside it.
+# Honor SAGENT_DATA_DIR (the same env the running server uses) so the default
+# log path tracks the real audit log. This mirrors
+# ``agent_team.mcp_sagent.delivery._resolve_data_dir``: env var if set, else the
+# launch cwd (NOT the package install dir, which is read-only site-packages when
+# installed).
 _DATA_DIR = Path(
     os.environ.get("SAGENT_DATA_DIR", str(Path.cwd()))
 ).expanduser()
-_DEFAULT_SAGENT = _DATA_DIR / "main.jsonl"
-_DEFAULT_CHANNEL = _DATA_DIR.parent / "channel" / "main.jsonl"
+_DEFAULT_LOG = _DATA_DIR / "main.jsonl"
 
 
-def _iter_records(path: Path, runtime_tag: str) -> Iterator[tuple[str, dict[str, Any]]]:
-    """Yield ``(ts, record)`` pairs from a jsonl file with the runtime stamped."""
+def _iter_records(path: Path, source_tag: str) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Yield ``(ts, record)`` pairs from a jsonl file with the source stamped."""
     if not path.exists():
         return
     with open(path, encoding="utf-8") as f:
@@ -57,12 +55,12 @@ def _iter_records(path: Path, runtime_tag: str) -> Iterator[tuple[str, dict[str,
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
-                # Skip malformed lines silently; chat/ has historically
-                # had a few from credit-balance errors mixed in.
+                # Skip malformed lines silently (a few have historically crept
+                # in from credit-balance error responses).
                 continue
             if not isinstance(rec, dict) or "ts" not in rec:
                 continue
-            rec.setdefault("runtime", runtime_tag)
+            rec.setdefault("source", source_tag)
             yield rec["ts"], rec
 
 
@@ -70,7 +68,7 @@ def merge(
     sources: list[tuple[Path, str]],
     *,
     since: str | None = None,
-    only_runtime: str | None = None,
+    only_source: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     """K-way merge across sources by ``ts``.
 
@@ -82,7 +80,7 @@ def merge(
     for ts, rec in heapq.merge(*streams, key=lambda pair: pair[0]):
         if since is not None and ts < since:
             continue
-        if only_runtime is not None and rec.get("runtime") != only_runtime:
+        if only_source is not None and rec.get("source") != only_source:
             continue
         yield rec
 
@@ -93,7 +91,7 @@ def main() -> int:
         "paths",
         nargs="*",
         type=Path,
-        help="Explicit jsonl paths (default: both channel/ and sagent/ logs).",
+        help="Explicit jsonl paths to merge (default: the SAGENT_DATA_DIR audit log).",
     )
     ap.add_argument(
         "--output",
@@ -106,32 +104,18 @@ def main() -> int:
         help="Drop records with ts < this prefix (e.g. '2026-06-01').",
     )
     ap.add_argument(
-        "--runtime",
-        choices=("channel", "sagent"),
-        help="Filter to one runtime.",
+        "--source",
+        help="Filter to records from one source tag.",
     )
     args = ap.parse_args()
 
     if args.paths:
-        # User-supplied: tag each by its parent directory name when
-        # heuristically recognisable, else by filename stem.
-        sources = []
-        for p in args.paths:
-            tag = (
-                "channel"
-                if "channel" in p.parts
-                else "sagent"
-                if "sagent" in p.parts
-                else p.stem
-            )
-            sources.append((p, tag))
+        # Tag each explicit input by its parent directory name, else its stem.
+        sources = [(p, p.parent.name or p.stem) for p in args.paths]
     else:
-        sources = [
-            (_DEFAULT_CHANNEL, "channel"),
-            (_DEFAULT_SAGENT, "sagent"),
-        ]
+        sources = [(_DEFAULT_LOG, _DATA_DIR.name or "audit")]
 
-    stream = merge(sources, since=args.since, only_runtime=args.runtime)
+    stream = merge(sources, since=args.since, only_source=args.source)
     out = (
         sys.stdout if args.output is None else open(args.output, "w", encoding="utf-8")
     )
