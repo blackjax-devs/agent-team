@@ -4,6 +4,10 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 
+# Build artifacts (setuptools / `uv build`)
+build/
+dist/
+
 # uv
 .venv/
 uv.lock.local

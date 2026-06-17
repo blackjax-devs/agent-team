@@ -1,8 +1,9 @@
 """Live serve: bring up all 5 agents + an HTTP/web viewer on 127.0.0.1.
 
-Run from the repo root:
+Launch via the installed console script (works from any cwd):
 
-    python bin/serve.py [--port 8767] [--host 127.0.0.1]
+    ai-dev-team [serve] [--port 8767] [--host 127.0.0.1]
+    # equivalently: python -m ai_dev_team.serve [--port 8767]
 
 What this does
 --------------
@@ -33,7 +34,6 @@ each agent's runtime drains gracefully.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from pathlib import Path
 
 import argparse
 import asyncio
@@ -44,9 +44,6 @@ import signal
 import sys
 
 
-_PLUGIN_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_PLUGIN_DIR))
-
 # Pulls in the data-dir resolution (env-configurable). All file paths
 # below derive from ``delivery.DATA_DIR`` / ``delivery.SESSIONS_DIR``
 # so a single ``SAGENT_DATA_DIR`` env var co-locates the audit log,
@@ -54,9 +51,10 @@ sys.path.insert(0, str(_PLUGIN_DIR))
 # for end-of-day merges that union this plugin's main.jsonl with the
 # sibling chat/ runtime's main.jsonl in one directory.
 from datetime import UTC
+from importlib.resources import files as _pkg_files
 from typing import Any
 
-from mcp_sagent import delivery
+from .mcp_sagent import delivery
 
 
 _DEFAULT_HOST = "127.0.0.1"
@@ -80,11 +78,11 @@ _LOG = logging.getLogger("ai_dev_team.serve")
 # The roster (and thus which subset of these is instantiated) is driven
 # entirely by the profile; a single-label roster yields a team of one.
 def _role_builders() -> dict:
-    from roles.junior_swe import build as build_junior
-    from roles.statistician import build as build_stat
-    from roles.swe import build as build_swe
-    from roles.tech_writer import build as build_tw
-    from roles.tl import build as build_tl
+    from .roles.junior_swe import build as build_junior
+    from .roles.statistician import build as build_stat
+    from .roles.swe import build as build_swe
+    from .roles.tech_writer import build as build_tw
+    from .roles.tl import build as build_tl
 
     return {
         "tl": build_tl,
@@ -106,7 +104,7 @@ def _build_all_agents(profile):
     messaging. A single-role roster boots fine: there are simply no peers
     to address (only ``user``).
     """
-    from runtime import trace_writer
+    from .runtime import trace_writer
 
     from sagent.testing import FakeAgent
     from sagent.tools.core import agent_registry
@@ -292,8 +290,14 @@ async def _warmup_agents(agents, *, timeout_s: float = 90.0) -> dict[str, bool]:
 # --------------------------------------------------------------------------
 
 
-_DEBUG_HTML_PATH = _PLUGIN_DIR / "web" / "debug.html"
-_INDEX_HTML_PATH = _PLUGIN_DIR / "web" / "index.html"
+# Web UI ships INSIDE the package (``ai_dev_team/web/*.html``); resolve via
+# importlib.resources so it works when installed into a venv from any cwd
+# (NOT ``__file__`` arithmetic that breaks under a relocated package). The
+# returned objects are ``Traversable``s; both ``.is_file()`` and
+# ``.read_text()`` work the same as on ``pathlib.Path``.
+_WEB_DIR = _pkg_files("ai_dev_team") / "web"
+_DEBUG_HTML_PATH = _WEB_DIR / "debug.html"
+_INDEX_HTML_PATH = _WEB_DIR / "index.html"
 
 
 def _event_search_text(ev: dict[str, Any]) -> tuple[str, str]:
@@ -456,7 +460,7 @@ def _diagnose_agent(label: str, agent) -> dict[str, Any]:
     # Recent trace events (last 6) — sourced from the trace file rather
     # than agent.runtime.events to match chat/'s "tail the trace" check.
     try:
-        from runtime import trace_writer
+        from .runtime import trace_writer
 
         tp = trace_writer.trace_path_for(label)
         events = _read_jsonl(tp)
@@ -614,7 +618,7 @@ def _build_http_app(agents):
       GET  /agents   = /api/agents
       POST /send     = /api/post
     """
-    from mcp_sagent import delivery
+    from .mcp_sagent import delivery
     from starlette.applications import Starlette
     from starlette.requests import Request
     from starlette.responses import HTMLResponse, JSONResponse, Response
@@ -626,14 +630,14 @@ def _build_http_app(agents):
     _KNOWN_ROLES = ["user", *sorted(agents), "system"]
 
     async def index(_request: Request) -> Response:
-        if not _INDEX_HTML_PATH.exists():
+        if not _INDEX_HTML_PATH.is_file():
             return JSONResponse(
                 {"error": f"missing {_INDEX_HTML_PATH}"}, status_code=404
             )
         return HTMLResponse(_INDEX_HTML_PATH.read_text(encoding="utf-8"))
 
     async def debug_index(_request: Request) -> Response:
-        if not _DEBUG_HTML_PATH.exists():
+        if not _DEBUG_HTML_PATH.is_file():
             return JSONResponse(
                 {"error": f"missing {_DEBUG_HTML_PATH}"}, status_code=404
             )
@@ -865,7 +869,7 @@ def _build_http_app(agents):
           GET /api/trace/<role>?around=N&ctx=K → window of K events on each side
                                                   of index N + offset/total/hit
         """
-        from runtime import trace_writer
+        from .runtime import trace_writer
 
         role = request.path_params["role"]
         if role not in agents:
@@ -1107,7 +1111,7 @@ async def _amain(host: str, port: int) -> int:
     # process; this env var is the only handshake.
     os.environ["SAGENT_HTTP_PORT"] = str(port)
 
-    from team_profile import load_profile
+    from .team_profile import load_profile
 
     profile = load_profile()
     _LOG.info(
@@ -1173,7 +1177,21 @@ async def _amain(host: str, port: int) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(
+        prog="ai-dev-team",
+        description=__doc__.split("\n\n")[0],
+    )
+    # Optional ``serve`` verb so both ``ai-dev-team`` and ``ai-dev-team serve``
+    # work (the latter is the documented launch form; there is only one command
+    # today, so the verb is accepted but optional). ``--help`` exits 0 via
+    # argparse BEFORE any agent/server boot.
+    ap.add_argument(
+        "command",
+        nargs="?",
+        default="serve",
+        choices=["serve"],
+        help="command to run (default: serve)",
+    )
     ap.add_argument("--host", default=_DEFAULT_HOST)
     ap.add_argument("--port", type=int, default=_DEFAULT_PORT)
     args = ap.parse_args(argv)

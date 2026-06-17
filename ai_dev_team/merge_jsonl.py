@@ -33,14 +33,13 @@ import sys
 
 
 # Honor SAGENT_DATA_DIR (the same env the running server uses) so the
-# default sagent log path tracks the real audit log, not the relocated
-# package dir. This mirrors ``mcp_sagent.delivery._resolve_data_dir``:
-# env var if set, else the plugin source dir (``<repo>/`` — this file's
-# grandparent, since merge_jsonl.py lives under ``bin/``). The legacy
-# tmux ``channel/`` log, when present, lives beside it.
-_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+# default sagent log path tracks the real audit log. This mirrors
+# ``ai_dev_team.mcp_sagent.delivery._resolve_data_dir``: env var if set,
+# else the launch cwd. The fallback is the cwd (NOT the package install
+# dir, which is read-only site-packages when installed); the legacy tmux
+# ``channel/`` log, when present, lives beside it.
 _DATA_DIR = Path(
-    os.environ.get("SAGENT_DATA_DIR", str(_PLUGIN_ROOT))
+    os.environ.get("SAGENT_DATA_DIR", str(Path.cwd()))
 ).expanduser()
 _DEFAULT_SAGENT = _DATA_DIR / "main.jsonl"
 _DEFAULT_CHANNEL = _DATA_DIR.parent / "channel" / "main.jsonl"

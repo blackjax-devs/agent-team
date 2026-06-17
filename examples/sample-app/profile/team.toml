@@ -1,9 +1,11 @@
 # sample-app profile — a statistician-only debug surface pointed at this example.
 #
-# It REUSES the default profile's role prompt (no duplication): the `prompt`
-# path below resolves relative to THIS profile dir back into profiles/default.
-# Launch from the examples/sample-app dir so [workspace].root = "." picks up
-# model.py as the workspace. See ../../README.md for the exact command.
+# This is a self-contained example profile: it carries its own copy of the
+# statistician role prompt under `roles/` (the default profile now ships INSIDE
+# the installed `ai_dev_team` package, so a repo-root `profiles/default` path is
+# no longer available to reuse). Launch from the examples/sample-app dir so
+# [workspace].root = "." picks up model.py as the workspace. See ../../README.md
+# for the exact command.
 
 [team]
 name = "sample-app"
@@ -22,6 +24,6 @@ statistician-only = ["statistician"]
 statistician = "claude-opus-4-8"
 
 [roles.statistician]
-# Reuse the default role prompt instead of copying it here.
-prompt = "../../../profiles/default/roles/statistician.md"
+# Local copy of the role prompt (resolves relative to THIS profile dir).
+prompt = "roles/statistician.md"
 sandbox = true

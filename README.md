@@ -27,18 +27,26 @@ Both share the same roles, methodology, and workspace config; only the runtime d
 
 ## Quickstart (channel) — provisional
 ```bash
-uv sync
-AI_DEV_TEAM_PROFILE_DIR=profiles/default \
-  .venv/bin/python bin/serve.py --port 8767
+uv sync                      # installs the package + the `ai-dev-team` console script
+ai-dev-team serve --port 8767   # or: python -m ai_dev_team.serve --port 8767
 # UI at http://127.0.0.1:8767/
 ```
+The bundled **default profile** ships inside the package, so it works out of the
+box from any cwd. To use a custom profile, set `AI_DEV_TEAM_PROFILE_DIR` to your
+profile dir. Per-session audit data (`main.jsonl`, `sessions/`) lands in the
+launch cwd by default; set `SAGENT_DATA_DIR` to relocate it.
+
+`ai-dev-team --help` prints usage and exits without booting the server.
 
 ## Profiles
 Behavior is driven by a **profile dir** (`AI_DEV_TEAM_PROFILE_DIR`): a
-[`team.toml`](profiles/default/team.toml) (roster, per-role model, workspace,
-sandbox, session-id namespace, presets) + role prompt templates. The default
-profile targets "an app that uses BlackJAX." The BlackJAX dev team itself runs
-this same framework against a **private** profile (its monorepo + worklog).
+[`team.toml`](ai_dev_team/profiles/default/team.toml) (roster, per-role model,
+workspace, sandbox, session-id namespace, presets) + role prompt templates. The
+bundled default profile ships inside the package
+(`ai_dev_team/profiles/default`) and targets "an app that uses BlackJAX"; it is
+used automatically when `AI_DEV_TEAM_PROFILE_DIR` is unset. The BlackJAX dev team
+itself runs this same framework against a **private** profile (its monorepo +
+worklog).
 
 Presets in the default profile: `dev-team` (the full five) and
 `statistician-only` (a single curated debug agent).

@@ -7,14 +7,12 @@ the wrappers in ``sandboxed_tools.py``.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .common import MODEL_OPUS, build_agent
 
 if TYPE_CHECKING:
-    from team_profile import Profile
+    from ..team_profile import Profile
 
 
 _ROLE = "statistician"
@@ -27,14 +25,11 @@ def build(profile: "Profile"):
     via sandboxed tool wrappers (see ``sandboxed_tools.py``).
     Model + system prompt come from the loaded profile.
     """
-    from team_profile import render_prompt
+    from ..team_profile import render_prompt
 
     from sagent import tools
 
-    plugin_dir = str(Path(__file__).resolve().parent.parent)
-    if plugin_dir not in sys.path:
-        sys.path.insert(0, plugin_dir)
-    import sandboxed_tools
+    from .. import sandboxed_tools
 
     sandbox = profile.sandbox_root
     sandbox.mkdir(parents=True, exist_ok=True)

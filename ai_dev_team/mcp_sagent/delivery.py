@@ -44,10 +44,16 @@ _LOG = logging.getLogger(__name__)
 # data with sibling runtimes (e.g. ``channel/main.jsonl``) for unified
 # end-of-day merges. Resolution order:
 #
-#   1. ``SAGENT_DATA_DIR`` env var if set (canonical — set by
-#      ``serve.py`` at startup; propagated to MCP-server subprocesses
+#   1. ``SAGENT_DATA_DIR`` env var if set (canonical — set by the
+#      operator / launch wrapper; propagated to MCP-server subprocesses
 #      via the per-role mcp.json ``env:`` block).
-#   2. Plugin source dir (default for casual/test runs).
+#   2. The launch cwd (default for casual/test runs).
+#
+# NOTE: the fallback is the current working directory, NOT the package
+# install location. When ``ai_dev_team`` is installed into a venv the
+# package dir is read-only site-packages, so writing ``main.jsonl`` there
+# would fail; the cwd is both writable and the natural place for an
+# operator's per-session audit data. Set ``SAGENT_DATA_DIR`` to relocate.
 #
 # Module-level singleton: resolved once at import. Tests that need to
 # override should monkeypatch :data:`MAIN_JSONL_PATH` directly (and
@@ -57,7 +63,7 @@ def _resolve_data_dir() -> Path:
     env = os.environ.get("SAGENT_DATA_DIR")
     if env:
         return Path(env).expanduser().resolve()
-    return Path(__file__).resolve().parent.parent
+    return Path.cwd()
 
 
 DATA_DIR = _resolve_data_dir()

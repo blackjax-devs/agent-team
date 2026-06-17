@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from .common import MODEL_HAIKU, build_agent
 
 if TYPE_CHECKING:
-    from team_profile import Profile
+    from ..team_profile import Profile
 
 
 _ROLE = "junior-swe"
@@ -23,7 +23,7 @@ def build(profile: "Profile"):
 
     Model + system prompt come from the loaded profile.
     """
-    from team_profile import render_prompt
+    from ..team_profile import render_prompt
 
     from sagent import tools
 

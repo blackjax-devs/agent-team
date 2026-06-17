@@ -1,6 +1,4 @@
-from pathlib import Path
-
-import sys
-
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Tests import the installed ``ai_dev_team`` package (CI runs them via
+# ``uvx --with-editable . --with pytest pytest``; locally use
+# ``uv run --with pytest pytest``). No ``sys.path`` shimming is needed —
+# the package is importable from its installed/editable location.

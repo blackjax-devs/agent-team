@@ -165,7 +165,7 @@ def build_provider():
 def _sagent_mcp_server_entry(role: str) -> dict[str, Any]:
     """Per-role stdio MCP entry for the CLI's ``--mcp-config``.
 
-    Spawns ``mcp_sagent/server.py`` with three env vars:
+    Spawns ``python -m ai_dev_team.mcp_sagent.server`` with three env vars:
 
       - ``SAGENT_ROLE``: the calling agent's label, used by the MCP
         server to attribute outgoing peer messages.
@@ -182,7 +182,7 @@ def _sagent_mcp_server_entry(role: str) -> dict[str, Any]:
     import os
     import sys
 
-    from mcp_sagent.config_factory import SERVER_SCRIPT
+    from ..mcp_sagent.config_factory import SERVER_MODULE
 
     port = os.environ.get("SAGENT_HTTP_PORT", "8767")
     env_out = {
@@ -197,7 +197,7 @@ def _sagent_mcp_server_entry(role: str) -> dict[str, Any]:
         env_out["SAGENT_DATA_DIR"] = data_dir
     return {
         "command": sys.executable,
-        "args": [str(SERVER_SCRIPT)],
+        "args": ["-m", SERVER_MODULE],
         "env": env_out,
     }
 
@@ -245,7 +245,7 @@ def _session_dir_for(role_name: str) -> Path:
     ``load_session`` + ``Agent.resume`` each role's tape. Co-located
     with the per-role traces under ``<SAGENT_DATA_DIR>/sessions/``.
     """
-    from mcp_sagent import delivery
+    from ..mcp_sagent import delivery
 
     path = delivery.SESSIONS_DIR / f"{role_name}.sagent"
     path.mkdir(parents=True, exist_ok=True)

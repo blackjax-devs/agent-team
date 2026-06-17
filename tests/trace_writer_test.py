@@ -7,7 +7,7 @@ from pathlib import Path
 
 import json
 
-from runtime import trace_writer
+from ai_dev_team.runtime import trace_writer
 
 
 @dataclass
@@ -121,8 +121,7 @@ def test_concurrent_appends_atomic(tmp_path: Path) -> None:
     target = tmp_path / "tl.trace.jsonl"
     script = f"""
 import json, sys
-sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r})
-from runtime import trace_writer
+from ai_dev_team.runtime import trace_writer
 tag = sys.argv[1]
 w = trace_writer.TraceWriter('tl', sessions_dir={str(tmp_path)!r})
 class E: pass

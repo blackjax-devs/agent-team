@@ -16,9 +16,9 @@ dependencies = [
     "mcp",
 ]
 
-# [project.scripts]
-# TODO(extract): wire the CLI once the flat layout is restructured into a
-# package (`ai_dev_team/`) — e.g. ai-dev-team = "ai_dev_team.cli:main".
+[project.scripts]
+ai-dev-team = "ai_dev_team.serve:main"
+ai-dev-team-merge = "ai_dev_team.merge_jsonl:main"
 
 [tool.uv.sources]
 sagent = { git = "https://github.com/rekursiv-ai/sagent.git", rev = "06603e217ad9c445fe3d23c8d5346aa893b734b8" }
@@ -29,4 +29,15 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["mcp_sagent*", "runtime*", "roles*"]
+include = ["ai_dev_team*"]
+
+# Ship the non-.py data that the package needs to work out of the box: the
+# web UI HTML (resolved via importlib.resources in serve.py) and the bundled
+# default profile (team.toml + role prompts, resolved in team_profile.py).
+# setuptools only ships declared package-data for non-.py files.
+[tool.setuptools.package-data]
+ai_dev_team = [
+    "web/*.html",
+    "profiles/**/*.toml",
+    "profiles/**/*.md",
+]

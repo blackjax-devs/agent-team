@@ -47,7 +47,6 @@ MCP bridge without re-running the probe.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import asyncio
@@ -60,17 +59,14 @@ import mcp.server.stdio
 import mcp.types as mcp_types
 
 
-# Ensure the plugin's siblings are importable when this module is
-# launched as a subprocess via ``--mcp-config``. We need ``delivery``
-# from :mod:`mcp_sagent.delivery`. Resolve the plugin root from
-# ``__file__`` rather than relying on ``PYTHONPATH``.
-_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
-if str(_PLUGIN_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PLUGIN_ROOT))
-
+# Launched as a subprocess via ``--mcp-config`` as
+# ``python -m ai_dev_team.mcp_sagent.server`` (see
+# :func:`ai_dev_team.roles.common._sagent_mcp_server_entry`), so the package
+# context is established and ``delivery`` resolves as an ordinary
+# package-relative import — no ``sys.path`` / ``PYTHONPATH`` shimming needed.
 from datetime import UTC
 
-from mcp_sagent import delivery
+from . import delivery
 
 
 _LOG = logging.getLogger("mcp_sagent.server")

@@ -15,7 +15,8 @@ Resolution of the active profile dir (in :func:`load_profile`):
 
   1. the explicit ``profile_dir`` argument, else
   2. ``$AI_DEV_TEAM_PROFILE_DIR``, else
-  3. ``<this repo>/profiles/default``.
+  3. the bundled default profile shipped inside the package
+     (``ai_dev_team/profiles/default``, resolved via importlib.resources).
 
 ``workspace_root`` and ``sandbox_root`` are resolved relative to the **launch
 cwd** (so ``root = "."`` means "the dir the operator launched from"). Each
@@ -28,13 +29,23 @@ from __future__ import annotations
 import os
 import tomllib
 from dataclasses import dataclass, field
+from importlib.resources import files as _pkg_files
 from pathlib import Path
 
 
-# Repo root = the dir containing this module. The default profile lives at
-# ``<repo>/profiles/default``.
-_REPO_ROOT = Path(__file__).resolve().parent
-_DEFAULT_PROFILE_DIR = _REPO_ROOT / "profiles" / "default"
+def _default_profile_dir() -> Path:
+    """Resolve the bundled default profile dir (``ai_dev_team/profiles/default``).
+
+    Uses :mod:`importlib.resources` rather than ``__file__`` arithmetic so the
+    default profile resolves correctly when the package is INSTALLED into a
+    venv (the profile ships as package data — see ``pyproject.toml``
+    ``[tool.setuptools.package-data]``). For a regular (non-zip) install the
+    returned ``Traversable`` is a real filesystem path; we coerce to
+    :class:`pathlib.Path` so the rest of :func:`load_profile` (which opens
+    ``team.toml`` and reads role prompts off disk) works unchanged.
+    """
+    return Path(_pkg_files("ai_dev_team") / "profiles" / "default")
+
 
 # The template token replaced by :func:`render_prompt` with the workspace block.
 _WORKSPACE_TOKEN = "{{workspace}}"
@@ -83,7 +94,7 @@ def _resolve_profile_dir(profile_dir: str | os.PathLike | None) -> Path:
     env = os.environ.get("AI_DEV_TEAM_PROFILE_DIR")
     if env:
         return Path(env).expanduser().resolve()
-    return _DEFAULT_PROFILE_DIR
+    return _default_profile_dir().resolve()
 
 
 def _resolve_roster(raw_roster, presets: dict[str, list[str]]) -> list[str]:

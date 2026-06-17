@@ -15,8 +15,8 @@ import asyncio
 import os
 
 import pytest
-import sandboxed_tools
 
+from ai_dev_team import sandboxed_tools
 from sagent.testing import with_fake_agent
 
 

@@ -17,13 +17,14 @@ cd examples/sample-app
 uv run python model.py
 ```
 
-## Pointing the team at it (documented reuse, no profile duplication)
+## Pointing the team at it
 
-`sample-app/profile/team.toml` is a tiny profile that **reuses the default
-profile's role prompts** (its `roles.statistician.prompt` resolves back into
-`profiles/default/roles/`). It sets `roster = "statistician-only"` and
-`[workspace].root = "."`, so it spins up a single statistician against whatever
-dir you launch from.
+`sample-app/profile/team.toml` is a tiny, **self-contained** profile: it carries
+its own copy of the statistician role prompt under `profile/roles/` (the default
+profile now ships inside the installed `ai_dev_team` package, so there is no
+repo-root `profiles/default` to point back into). It sets
+`roster = "statistician-only"` and `[workspace].root = "."`, so it spins up a
+single statistician against whatever dir you launch from.
 
 Two resolution rules to keep straight:
 
@@ -34,32 +35,34 @@ Two resolution rules to keep straight:
 ### Channel (sagent server) — statistician-only against `sample-app`
 
 ```bash
-# from the repo root, after `uv sync`:
+# from the repo root, after `uv sync` (installs the `ai-dev-team` console script):
 cd examples/sample-app
 AI_DEV_TEAM_PROFILE_DIR=profile \
-  ../../.venv/bin/python ../../bin/serve.py --port 8767
+  ../../.venv/bin/ai-dev-team --port 8767
 # UI at http://127.0.0.1:8767/ — a single statistician debug surface,
 # workspace = examples/sample-app (model.py).
 ```
 
 `AI_DEV_TEAM_PROFILE_DIR=profile` is relative to the `examples/sample-app`
-launch cwd; an absolute path works too.
+launch cwd; an absolute path works too. (`../../.venv/bin/ai-dev-team` is just
+the console script in the repo venv; once installed on `PATH` you can call
+`ai-dev-team` directly, or `python -m ai_dev_team.serve`.)
 
 ### Verify the profile resolves (no model turns)
 
 ```bash
 cd examples/sample-app
 AI_DEV_TEAM_PROFILE_DIR=profile python -c "
-import sys; sys.path.insert(0, '../..')
-from team_profile import load_profile
+from ai_dev_team.team_profile import load_profile
 p = load_profile()
 print(p.roster, p.workspace_root, p.role_prompts['statistician'])
 "
-# -> ['statistician'] .../examples/sample-app .../profiles/default/roles/statistician.md
+# -> ['statistician'] .../examples/sample-app .../examples/sample-app/profile/roles/statistician.md
 ```
 
 ### Reuse the full default roster instead
 
-Drop `AI_DEV_TEAM_PROFILE_DIR` (or set it to `../../profiles/default`) while
-still launching from `examples/sample-app`; you get the full
+Drop `AI_DEV_TEAM_PROFILE_DIR` while still launching from
+`examples/sample-app`; resolution falls back to the **bundled default profile**
+(shipped inside the `ai_dev_team` package), giving you the full
 `tl/swe/junior-swe/statistician/tech-writer` team against the same workspace.

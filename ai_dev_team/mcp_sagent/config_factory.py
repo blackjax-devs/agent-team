@@ -25,19 +25,30 @@ also updating the role onboarding text.
 
 from __future__ import annotations
 
+from importlib.resources import files as _pkg_files
 from pathlib import Path
 
 import json
 import sys
 
 
-PLUGIN_ROOT = Path(__file__).resolve().parent.parent
-SERVER_SCRIPT = PLUGIN_ROOT / "mcp_sagent" / "server.py"
+# The MCP server is launched as a module (``python -m
+# ai_dev_team.mcp_sagent.server``) rather than by file path, so it works when
+# the package is INSTALLED (a relative import inside ``server.py`` would fail
+# if it were run as a bare script). This is the canonical spawn form; see
+# :data:`SERVER_MODULE` and ``write_role_config`` / ``common._sagent_mcp_server_entry``.
+SERVER_MODULE = "ai_dev_team.mcp_sagent.server"
+
+# Filesystem path to ``server.py`` inside the (installed) package — kept for
+# debugging / forensics only. Resolved via importlib.resources so it points at
+# the installed location, NOT a source-tree path. Not used for the spawn
+# command (that uses ``-m SERVER_MODULE``).
+SERVER_SCRIPT = Path(_pkg_files("ai_dev_team") / "mcp_sagent" / "server.py")
 
 # Per-role mcp.json files live in the data dir, NOT the plugin code
-# dir. Resolved via :mod:`mcp_sagent.delivery` so this module agrees
-# with where ``main.jsonl`` and the trace files land.
-from mcp_sagent import delivery
+# dir. Resolved via :mod:`ai_dev_team.mcp_sagent.delivery` so this module
+# agrees with where ``main.jsonl`` and the trace files land.
+from . import delivery
 
 
 SESSIONS_DIR = delivery.SESSIONS_DIR
@@ -56,7 +67,7 @@ def write_role_config(
         "mcpServers": {
             "sagent_chat": {
                 "command": python or sys.executable,
-                "args": [str(SERVER_SCRIPT)],
+                "args": ["-m", SERVER_MODULE],
                 "env": {
                     "SAGENT_ROLE": role,
                     "SAGENT_HTTP_URL": serve_url,
