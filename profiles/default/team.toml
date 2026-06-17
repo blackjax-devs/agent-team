@@ -1,0 +1,56 @@
+# ai-dev-team — default profile: "an app that uses BlackJAX".
+#
+# Copy this directory, point AI_DEV_TEAM_PROFILE_DIR at the copy, and edit.
+# The BlackJAX dev team runs the same framework against a PRIVATE profile
+# (its monorepo workspace + real prompts + worklog), kept out of this repo.
+
+[team]
+name = "ai-dev-team"
+# uuid5 namespace for per-role session ids. Change per deployment so two
+# deployments on the same machine/cwd don't collide on claude session files.
+session_id_namespace = "ai-dev-team"
+
+[workspace]
+# A single project dir (default), OR a list of repos for a monorepo.
+# Default behavior: the launch cwd.
+root = "."
+# repos = ["pkg-a", "pkg-b"]        # uncomment for a multi-repo monorepo
+#
+# Sandbox root for write-capable roles (statistician's SandboxedWrite/Edit).
+# Default: an in-workspace scratch dir.
+sandbox_root = ".ai-dev-team/sandbox"
+#
+# One-line description of the workspace, injected into role prompts via the
+# {{workspace}} template block (replaces the hardcoded "BlackJAX monorepo" text).
+description = "a Python application that uses the BlackJAX sampling library"
+
+# Active roster: which roles to spin up (1..N). A single role = a team of one
+# (e.g. a dedicated statistician debug surface). Use a preset or list explicitly.
+roster = ["tl", "swe", "junior-swe", "statistician", "tech-writer"]
+
+[presets]
+dev-team = ["tl", "swe", "junior-swe", "statistician", "tech-writer"]
+statistician-only = ["statistician"]
+
+# Per-role model. Conservative defaults; override freely. (Do NOT use
+# claude-fable-5 — it 404s on standard accounts.)
+[models]
+tl = "claude-opus-4-8"
+swe = "claude-sonnet-4-6"
+junior-swe = "claude-haiku-4-5"
+statistician = "claude-opus-4-8"
+tech-writer = "claude-haiku-4-5"
+
+# Role prompt templates (relative to this profile dir). The {{workspace}} block
+# in each is filled from [workspace] above.
+[roles.tl]
+prompt = "roles/tl.md"
+[roles.swe]
+prompt = "roles/swe.md"
+[roles.junior-swe]
+prompt = "roles/junior-swe.md"
+[roles.statistician]
+prompt = "roles/statistician.md"
+sandbox = true
+[roles.tech-writer]
+prompt = "roles/tech-writer.md"

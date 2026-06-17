@@ -1,0 +1,32 @@
+[project]
+name = "ai-dev-team"
+version = "0.1.0"
+description = "A configurable, Bayesian-aware multi-agent dev team on sagent + the Claude CLI. Default profile: building/debugging apps that use BlackJAX."
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+dependencies = [
+    # sagent: pinned to merged main (PR #177) until a PyPI release (>=0.1.7)
+    # ships the merged provider work — session_id / subprocess_read_timeout_sec
+    # on model(), and the CancelledError->SIGINT interrupt path. PyPI 0.1.6
+    # predates it, so a plain `sagent>=0.1.6` pin would break the channel.
+    "sagent",
+    "starlette",
+    "uvicorn",
+    "mcp",
+]
+
+# [project.scripts]
+# TODO(extract): wire the CLI once the flat layout is restructured into a
+# package (`ai_dev_team/`) — e.g. ai-dev-team = "ai_dev_team.cli:main".
+
+[tool.uv.sources]
+sagent = { git = "https://github.com/rekursiv-ai/sagent.git", rev = "06603e217ad9c445fe3d23c8d5346aa893b734b8" }
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mcp_sagent*", "runtime*", "roles*"]

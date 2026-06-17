@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# uv
+.venv/
+uv.lock.local
+
+# Runtime artifacts (when a channel is running with an in-tree data dir)
+main.jsonl
+sessions/*.trace.jsonl
+sessions/*.mcp.json
+sessions/*.sagent/
+sessions/_suppress_audit
+sessions/mcp_calls.log
+sessions/serve.log
+sessions/serve.pid
