@@ -33,20 +33,20 @@ import sys
 
 
 # The MCP server is launched as a module (``python -m
-# ai_dev_team.mcp_sagent.server``) rather than by file path, so it works when
+# agent_team.mcp_sagent.server``) rather than by file path, so it works when
 # the package is INSTALLED (a relative import inside ``server.py`` would fail
 # if it were run as a bare script). This is the canonical spawn form; see
 # :data:`SERVER_MODULE` and ``write_role_config`` / ``common._sagent_mcp_server_entry``.
-SERVER_MODULE = "ai_dev_team.mcp_sagent.server"
+SERVER_MODULE = "agent_team.mcp_sagent.server"
 
 # Filesystem path to ``server.py`` inside the (installed) package — kept for
 # debugging / forensics only. Resolved via importlib.resources so it points at
 # the installed location, NOT a source-tree path. Not used for the spawn
 # command (that uses ``-m SERVER_MODULE``).
-SERVER_SCRIPT = Path(_pkg_files("ai_dev_team") / "mcp_sagent" / "server.py")
+SERVER_SCRIPT = Path(_pkg_files("agent_team") / "mcp_sagent" / "server.py")
 
 # Per-role mcp.json files live in the data dir, NOT the plugin code
-# dir. Resolved via :mod:`ai_dev_team.mcp_sagent.delivery` so this module
+# dir. Resolved via :mod:`agent_team.mcp_sagent.delivery` so this module
 # agrees with where ``main.jsonl`` and the trace files land.
 from . import delivery
 

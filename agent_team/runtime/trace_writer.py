@@ -36,7 +36,7 @@ import json
 
 # Trace files co-locate with ``main.jsonl`` and the per-role
 # ``*.mcp.json`` configs in the plugin's *data* dir (configurable
-# via ``SAGENT_DATA_DIR``; see :mod:`ai_dev_team.mcp_sagent.delivery`).
+# via ``SAGENT_DATA_DIR``; see :mod:`agent_team.mcp_sagent.delivery`).
 # Imported at module load — lives in the same Python process as
 # ``serve.py`` so the env-resolved value reflects the launching process's
 # environment.

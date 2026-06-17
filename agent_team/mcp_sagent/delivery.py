@@ -1,4 +1,4 @@
-"""Peer-message delivery + audit-log writes for ai-dev-team.
+"""Peer-message delivery + audit-log writes for agent-team.
 
 The MCP server runs as a subprocess of ``claude --print``, which is a
 subprocess of ``serve.py``. They are three separate Python processes,
@@ -50,7 +50,7 @@ _LOG = logging.getLogger(__name__)
 #   2. The launch cwd (default for casual/test runs).
 #
 # NOTE: the fallback is the current working directory, NOT the package
-# install location. When ``ai_dev_team`` is installed into a venv the
+# install location. When ``agent_team`` is installed into a venv the
 # package dir is read-only site-packages, so writing ``main.jsonl`` there
 # would fail; the cwd is both writable and the natural place for an
 # operator's per-session audit data. Set ``SAGENT_DATA_DIR`` to relocate.

@@ -43,7 +43,7 @@ _SESSION_UUID_NAMESPACE = "9e0e2c30-3f7e-4a13-9f5b-1a3a2c4d5e6f"
 # Fallback session-id namespace string when no profile namespace is threaded
 # through. Generic framework default; real deployments always override this
 # via ``profile.session_id_namespace`` (see ``team.toml [team]``).
-_DEFAULT_SESSION_NAMESPACE = "ai-dev-team"
+_DEFAULT_SESSION_NAMESPACE = "agent-team"
 
 HEAVY_BG_REMINDER = """\
 Operating reminder: if a job is expected to be heavy (memory or CPU), \
@@ -165,7 +165,7 @@ def build_provider():
 def _sagent_mcp_server_entry(role: str) -> dict[str, Any]:
     """Per-role stdio MCP entry for the CLI's ``--mcp-config``.
 
-    Spawns ``python -m ai_dev_team.mcp_sagent.server`` with three env vars:
+    Spawns ``python -m agent_team.mcp_sagent.server`` with three env vars:
 
       - ``SAGENT_ROLE``: the calling agent's label, used by the MCP
         server to attribute outgoing peer messages.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# setup.sh — install the ai-dev-team AGENT PACK into a target repo.
+# setup.sh — install the agent-team AGENT PACK into a target repo.
 #
 # Drops a Bayesian-aware Claude Code subagent team (tl / swe / junior-swe /
 # statistician / tech-writer) into <target>/.claude/agents/, plus the
@@ -71,7 +71,7 @@ else
 fi
 AGENTS_DST="$TARGET/.claude/agents"
 
-echo "Installing ai-dev-team agent pack"
+echo "Installing agent-team agent pack"
 echo "  target:     $TARGET"
 echo "  agents  ->  $AGENTS_DST"
 echo "  checklists -> $CHECKLISTS_DST"

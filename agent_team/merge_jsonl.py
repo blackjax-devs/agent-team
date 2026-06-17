@@ -34,7 +34,7 @@ import sys
 
 # Honor SAGENT_DATA_DIR (the same env the running server uses) so the
 # default sagent log path tracks the real audit log. This mirrors
-# ``ai_dev_team.mcp_sagent.delivery._resolve_data_dir``: env var if set,
+# ``agent_team.mcp_sagent.delivery._resolve_data_dir``: env var if set,
 # else the launch cwd. The fallback is the cwd (NOT the package install
 # dir, which is read-only site-packages when installed); the legacy tmux
 # ``channel/`` log, when present, lives beside it.

@@ -1,6 +1,6 @@
 # Agent Pack — a Bayesian-aware Claude Code team for your repo
 
-The **agent pack** is the *native Claude Code* surface of `ai-dev-team`: a
+The **agent pack** is the *native Claude Code* surface of `agent-team`: a
 drop-in set of subagent definitions you install into your **own** repository so
 that Claude Code gives you a Bayesian-aware engineering team — a Tech Lead that
 plans and fans out to specialists.
@@ -11,7 +11,7 @@ understands sampling, not just code."*
 
 ## What it is (and how it differs from the channel)
 
-There are two ways to use `ai-dev-team`:
+There are two ways to use `agent-team`:
 
 | | **Agent pack** (this) | **sagent channel** |
 |---|---|---|

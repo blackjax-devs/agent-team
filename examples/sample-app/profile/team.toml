@@ -2,18 +2,18 @@
 #
 # This is a self-contained example profile: it carries its own copy of the
 # statistician role prompt under `roles/` (the default profile now ships INSIDE
-# the installed `ai_dev_team` package, so a repo-root `profiles/default` path is
+# the installed `agent_team` package, so a repo-root `profiles/default` path is
 # no longer available to reuse). Launch from the examples/sample-app dir so
 # [workspace].root = "." picks up model.py as the workspace. See ../../README.md
 # for the exact command.
 
 [team]
 name = "sample-app"
-session_id_namespace = "ai-dev-team-sample-app"
+session_id_namespace = "agent-team-sample-app"
 
 [workspace]
 root = "."                                  # = examples/sample-app (the launch cwd)
-sandbox_root = ".ai-dev-team/sandbox"
+sandbox_root = ".agent-team/sandbox"
 description = "a minimal Python app that uses BlackJAX (see model.py)"
 roster = "statistician-only"                # single-role debug surface
 

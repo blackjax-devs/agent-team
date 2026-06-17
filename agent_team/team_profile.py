@@ -14,9 +14,9 @@ A profile dir contains:
 Resolution of the active profile dir (in :func:`load_profile`):
 
   1. the explicit ``profile_dir`` argument, else
-  2. ``$AI_DEV_TEAM_PROFILE_DIR``, else
+  2. ``$AGENT_TEAM_PROFILE_DIR``, else
   3. the bundled default profile shipped inside the package
-     (``ai_dev_team/profiles/default``, resolved via importlib.resources).
+     (``agent_team/profiles/default``, resolved via importlib.resources).
 
 ``workspace_root`` and ``sandbox_root`` are resolved relative to the **launch
 cwd** (so ``root = "."`` means "the dir the operator launched from"). Each
@@ -34,7 +34,7 @@ from pathlib import Path
 
 
 def _default_profile_dir() -> Path:
-    """Resolve the bundled default profile dir (``ai_dev_team/profiles/default``).
+    """Resolve the bundled default profile dir (``agent_team/profiles/default``).
 
     Uses :mod:`importlib.resources` rather than ``__file__`` arithmetic so the
     default profile resolves correctly when the package is INSTALLED into a
@@ -44,7 +44,7 @@ def _default_profile_dir() -> Path:
     :class:`pathlib.Path` so the rest of :func:`load_profile` (which opens
     ``team.toml`` and reads role prompts off disk) works unchanged.
     """
-    return Path(_pkg_files("ai_dev_team") / "profiles" / "default")
+    return Path(_pkg_files("agent_team") / "profiles" / "default")
 
 
 # The template token replaced by :func:`render_prompt` with the workspace block.
@@ -91,7 +91,7 @@ class Profile:
 def _resolve_profile_dir(profile_dir: str | os.PathLike | None) -> Path:
     if profile_dir is not None:
         return Path(profile_dir).expanduser().resolve()
-    env = os.environ.get("AI_DEV_TEAM_PROFILE_DIR")
+    env = os.environ.get("AGENT_TEAM_PROFILE_DIR")
     if env:
         return Path(env).expanduser().resolve()
     return _default_profile_dir().resolve()
@@ -139,14 +139,14 @@ def load_profile(profile_dir: str | os.PathLike | None = None) -> Profile:
     models = dict(data.get("models", {}))
     roles_table = data.get("roles", {})
 
-    name = str(team.get("name", "ai-dev-team"))
+    name = str(team.get("name", "agent-team"))
     session_id_namespace = str(team.get("session_id_namespace", name))
 
     # workspace_root / sandbox_root resolve relative to the launch cwd.
     cwd = Path.cwd()
     root_raw = str(workspace.get("root", "."))
     workspace_root = (cwd / root_raw).resolve()
-    sandbox_raw = str(workspace.get("sandbox_root", ".ai-dev-team/sandbox"))
+    sandbox_raw = str(workspace.get("sandbox_root", ".agent-team/sandbox"))
     sandbox_path = Path(sandbox_raw)
     sandbox_root = (
         sandbox_path.resolve()

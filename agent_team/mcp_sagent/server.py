@@ -1,4 +1,4 @@
-"""MCP stdio server for ai-dev-team peer messaging.
+"""MCP stdio server for agent-team peer messaging.
 
 This module is the entry point that each agent's ``claude --print``
 subprocess spawns via its ``--mcp-config``. The CLI talks to it over
@@ -60,8 +60,8 @@ import mcp.types as mcp_types
 
 
 # Launched as a subprocess via ``--mcp-config`` as
-# ``python -m ai_dev_team.mcp_sagent.server`` (see
-# :func:`ai_dev_team.roles.common._sagent_mcp_server_entry`), so the package
+# ``python -m agent_team.mcp_sagent.server`` (see
+# :func:`agent_team.roles.common._sagent_mcp_server_entry`), so the package
 # context is established and ``delivery`` resolves as an ordinary
 # package-relative import — no ``sys.path`` / ``PYTHONPATH`` shimming needed.
 from datetime import UTC

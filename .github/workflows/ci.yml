@@ -48,14 +48,14 @@ jobs:
         run: uvx --with-editable . --with pytest pytest -q
 
       # Framework import smoke: package import + bundled-default profile load
-      # (no AI_DEV_TEAM_PROFILE_DIR — exercises the in-package default that
+      # (no AGENT_TEAM_PROFILE_DIR — exercises the in-package default that
       # ships as package data) + serve entry point is callable. Run from a
       # different cwd so it proves the install does not rely on a source path.
       - name: Framework import smoke
         run: |
           cd "$RUNNER_TEMP"
-          uv run --project "$GITHUB_WORKSPACE" python -c "import ai_dev_team; from ai_dev_team.team_profile import load_profile; load_profile(); from ai_dev_team.serve import main; assert callable(main)"
+          uv run --project "$GITHUB_WORKSPACE" python -c "import agent_team; from agent_team.team_profile import load_profile; load_profile(); from agent_team.serve import main; assert callable(main)"
 
       # Console-script smoke: --help must print usage and exit 0 without booting.
       - name: Console script --help
-        run: uv run ai-dev-team --help
+        run: uv run agent-team --help

@@ -2,8 +2,8 @@
 
 Launch via the installed console script (works from any cwd):
 
-    ai-dev-team [serve] [--port 8767] [--host 127.0.0.1]
-    # equivalently: python -m ai_dev_team.serve [--port 8767]
+    agent-team [serve] [--port 8767] [--host 127.0.0.1]
+    # equivalently: python -m agent_team.serve [--port 8767]
 
 What this does
 --------------
@@ -66,7 +66,7 @@ _MAIN_JSONL = delivery.MAIN_JSONL_PATH
 # window. Path must match :data:`mcp_sagent.server._SUPPRESS_FLAG`.
 _SUPPRESS_FLAG = delivery.SESSIONS_DIR / "_suppress_audit"
 
-_LOG = logging.getLogger("ai_dev_team.serve")
+_LOG = logging.getLogger("agent_team.serve")
 
 
 # --------------------------------------------------------------------------
@@ -290,12 +290,12 @@ async def _warmup_agents(agents, *, timeout_s: float = 90.0) -> dict[str, bool]:
 # --------------------------------------------------------------------------
 
 
-# Web UI ships INSIDE the package (``ai_dev_team/web/*.html``); resolve via
+# Web UI ships INSIDE the package (``agent_team/web/*.html``); resolve via
 # importlib.resources so it works when installed into a venv from any cwd
 # (NOT ``__file__`` arithmetic that breaks under a relocated package). The
 # returned objects are ``Traversable``s; both ``.is_file()`` and
 # ``.read_text()`` work the same as on ``pathlib.Path``.
-_WEB_DIR = _pkg_files("ai_dev_team") / "web"
+_WEB_DIR = _pkg_files("agent_team") / "web"
 _DEBUG_HTML_PATH = _WEB_DIR / "debug.html"
 _INDEX_HTML_PATH = _WEB_DIR / "index.html"
 
@@ -1178,10 +1178,10 @@ async def _amain(host: str, port: int) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        prog="ai-dev-team",
+        prog="agent-team",
         description=__doc__.split("\n\n")[0],
     )
-    # Optional ``serve`` verb so both ``ai-dev-team`` and ``ai-dev-team serve``
+    # Optional ``serve`` verb so both ``agent-team`` and ``agent-team serve``
     # work (the latter is the documented launch form; there is only one command
     # today, so the verb is accepted but optional). ``--help`` exits 0 via
     # argparse BEFORE any agent/server boot.

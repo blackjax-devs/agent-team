@@ -16,7 +16,7 @@ import os
 
 import pytest
 
-from ai_dev_team import sandboxed_tools
+from agent_team import sandboxed_tools
 from sagent.testing import with_fake_agent
 
 

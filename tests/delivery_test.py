@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 
-from ai_dev_team.mcp_sagent import delivery
+from agent_team.mcp_sagent import delivery
 
 import pytest
 

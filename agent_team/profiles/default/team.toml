@@ -1,14 +1,14 @@
-# ai-dev-team — default profile: "an app that uses BlackJAX".
+# agent-team — default profile: "an app that uses BlackJAX".
 #
-# Copy this directory, point AI_DEV_TEAM_PROFILE_DIR at the copy, and edit.
+# Copy this directory, point AGENT_TEAM_PROFILE_DIR at the copy, and edit.
 # The BlackJAX dev team runs the same framework against a PRIVATE profile
 # (its monorepo workspace + real prompts + worklog), kept out of this repo.
 
 [team]
-name = "ai-dev-team"
+name = "agent-team"
 # uuid5 namespace for per-role session ids. Change per deployment so two
 # deployments on the same machine/cwd don't collide on claude session files.
-session_id_namespace = "ai-dev-team"
+session_id_namespace = "agent-team"
 
 [workspace]
 # A single project dir (default), OR a list of repos for a monorepo.
@@ -18,7 +18,7 @@ root = "."
 #
 # Sandbox root for write-capable roles (statistician's SandboxedWrite/Edit).
 # Default: an in-workspace scratch dir.
-sandbox_root = ".ai-dev-team/sandbox"
+sandbox_root = ".agent-team/sandbox"
 #
 # One-line description of the workspace, injected into role prompts via the
 # {{workspace}} template block (replaces the hardcoded "BlackJAX monorepo" text).
