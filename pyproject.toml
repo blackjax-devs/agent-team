@@ -6,14 +6,17 @@ requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "MIT" }
 dependencies = [
-    # sagent: tracked at upstream main via a DIRECT URL (not [tool.uv.sources]),
-    # so the pin TRAVELS with a from-git install — `uvx --from git+…/agent-team`
-    # and `uv tool install git+…/agent-team` resolve sagent from main too, no
-    # `--with` override needed. PyPI 0.1.6 predates the merged provider work
-    # (PR #177: session_id / subprocess_read_timeout_sec on model(), the
-    # CancelledError->SIGINT interrupt path), so the PyPI release won't work yet.
-    # Once sagent ships >=0.1.7, switch this to a plain "sagent>=0.1.7".
-    "sagent @ git+https://github.com/rekursiv-ai/sagent.git@main",
+    # sagent: pinned to a KNOWN-GOOD rev via a DIRECT URL (not [tool.uv.sources],
+    # so the pin still TRAVELS with a from-git install — `uvx --from
+    # git+…/agent-team` resolves this same rev, no `--with` override needed). We
+    # pin a rev rather than @main because sagent's provider API is mid-rework:
+    # main's AnthropicCLI.model() has DROPPED extra_mcp_servers / session_id /
+    # subprocess_read_timeout_sec (which roles/common.py passes), so @main breaks
+    # the channel boot. This rev (06603e2 = the PR #177 merge) is the last one
+    # whose model() API agent-team targets. Revisit when sagent stabilizes /
+    # ships >=0.1.7 (then a plain "sagent>=0.1.7"); nightly-sagent-head.yml warns
+    # when main drifts further.
+    "sagent @ git+https://github.com/rekursiv-ai/sagent.git@06603e217ad9c445fe3d23c8d5346aa893b734b8",
     "starlette",
     "uvicorn",
     "mcp",

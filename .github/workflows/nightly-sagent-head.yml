@@ -1,0 +1,67 @@
+name: nightly-sagent-head
+
+# DRIFT DETECTOR (separate from CI on purpose).
+#
+# CI (ci.yml) tests against our PINNED, known-good sagent rev. This workflow
+# instead resolves sagent from main HEAD and runs the same suite PLUS the
+# boot-construct smoke, so we learn — nightly — when sagent main drifts away from
+# the API agent-team targets. (It already has: main's AnthropicCLI.model() dropped
+# extra_mcp_servers / session_id / subprocess_read_timeout_sec after the #177
+# merge, breaking the channel boot.) A FAILING run here is the signal to migrate
+# before we bump the pin. It gates nothing — own status, own badge.
+#
+# How: rewrite the direct-URL sagent pin in pyproject.toml from @<rev> to @main so
+# `uv sync` re-resolves to current HEAD.
+
+on:
+  schedule:
+    # 04:47 UTC daily — offset from CI's nightly (03:17) and off the hour.
+    - cron: "47 4 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  sagent-head:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Retarget the sagent dep at upstream HEAD (main)
+        run: |
+          python - <<'PY'
+          import re, pathlib
+          p = pathlib.Path("pyproject.toml")
+          t = p.read_text()
+          # Rewrite the direct-URL sagent pin (…/sagent.git@<rev-or-branch>) to @main.
+          new, n = re.subn(
+              r'(sagent @ git\+https://github\.com/rekursiv-ai/sagent\.git@)[^"\s]+',
+              r'\1main', t)
+          if n == 0:
+              raise SystemExit("no sagent direct-URL pin found to retarget — adjust this workflow")
+          p.write_text(new)
+          PY
+          grep -n 'sagent @ git' pyproject.toml
+
+      - name: Sync against sagent HEAD
+        run: uv sync
+
+      - name: Report resolved sagent
+        run: uv run python -c "import sagent, importlib.metadata as m; print('sagent', m.version('sagent'), '->', sagent.__file__)"
+
+      - name: Run test suite against sagent HEAD
+        run: uvx --with-editable . --with pytest pytest -q
+
+      # The load-bearing check: BUILD the agents (calls provider.model() per role).
+      # This is what catches a model()-signature drift on main — the plain import
+      # smoke does not reach it.
+      - name: Boot-construct smoke against sagent HEAD
+        run: |
+          cd "$RUNNER_TEMP"
+          SAGENT_DATA_DIR="$RUNNER_TEMP/data" uv run --project "$GITHUB_WORKSPACE" python -c "from agent_team.team_profile import load_profile; from agent_team.serve import _build_all_agents; a=_build_all_agents(load_profile()); assert len(a)==5, a; print('boot-construct OK:', sorted(a))"

@@ -2,18 +2,20 @@ name: CI
 
 # Triggers: every push/PR to main, plus a nightly schedule.
 #
-# agent-team TRACKS sagent main (a direct-URL dep in pyproject.toml, no lock pin),
-# so every `uv sync` here re-resolves to the current main HEAD. That makes this CI
-# the drift detector: if a sagent main commit breaks our API usage (the #177
-# surface — session_id / subprocess_read_timeout_sec on model(), the
-# CancelledError->SIGINT interrupt path — or anything after), CI goes red on the
-# next push or the nightly run rather than silently at a future feature push.
-# (This replaces the old separate nightly-sagent-head drift workflow, now that
-# the default dep IS main.)
+# agent-team pins sagent to a KNOWN-GOOD rev (direct-URL dep in pyproject.toml),
+# because main's provider API is mid-rework: main's AnthropicCLI.model() dropped
+# extra_mcp_servers / session_id / subprocess_read_timeout_sec, which
+# roles/common.py passes — so @main breaks the channel boot. This CI tests the
+# stable pinned rev; the separate nightly-sagent-head.yml resolves sagent main +
+# boot-constructs the agents to warn us when main drifts further.
 #
-# TODO(repin): once sagent ships the merged provider work in a PyPI release
-# (>=0.1.7), switch the dep to a plain `sagent>=0.1.7` for reproducible installs;
-# a nightly can then preview main rather than being load-bearing.
+# Note the BOOT-CONSTRUCT smoke below: the import smoke alone does NOT call
+# provider.model(), so it missed exactly this kind of drift — _build_all_agents()
+# is what actually exercises the provider signature. (That gap let a @main bump
+# pass CI green while the channel failed to boot for a real user.)
+#
+# TODO(repin): once sagent stabilizes / ships >=0.1.7, switch the dep to a plain
+# `sagent>=0.1.7` (reproducible installs); the nightly can then just preview main.
 
 on:
   push:
@@ -38,8 +40,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
-      # sagent is a direct-URL dep tracking main (pyproject.toml); uv re-resolves
-      # it to the current HEAD (no lock pin), so this run reflects live main.
+      # sagent is a direct-URL dep pinned to a known-good rev (pyproject.toml).
       - name: Sync dependencies
         run: uv sync
 
@@ -55,6 +56,15 @@ jobs:
         run: |
           cd "$RUNNER_TEMP"
           uv run --project "$GITHUB_WORKSPACE" python -c "import agent_team; from agent_team.team_profile import load_profile; load_profile(); from agent_team.serve import main; assert callable(main)"
+
+      # Boot-construct smoke: actually BUILD all agents (calls provider.model()
+      # per role — the provider-signature surface). The import smoke above never
+      # reaches this, so it cannot catch a sagent model() signature change; this
+      # step can. No claude subprocess is spawned (that starts on the first turn).
+      - name: Boot-construct smoke
+        run: |
+          cd "$RUNNER_TEMP"
+          SAGENT_DATA_DIR="$RUNNER_TEMP/data" uv run --project "$GITHUB_WORKSPACE" python -c "from agent_team.team_profile import load_profile; from agent_team.serve import _build_all_agents; a=_build_all_agents(load_profile()); assert sorted(a)==['junior-swe','statistician','swe','tech-writer','tl'], a; print('boot-construct OK:', sorted(a))"
 
       # Console-script smoke: --help must print usage and exit 0 without booting.
       - name: Console script --help
