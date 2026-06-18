@@ -20,6 +20,8 @@ Conventions:
 
 from __future__ import annotations
 
+import inspect
+
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -346,21 +348,27 @@ def build_agent(
     # plugin's MCP server exposes peer-messaging as
     # ``mcp__sagent_chat__sagent_send`` / ``__sagent_defer`` /
     # ``__sagent_self``.
+    # extra_mcp_servers (peer messaging) + the read timeout are required by every
+    # CLI-backed agent — passed unconditionally.
+    model_kwargs: dict[str, Any] = {
+        "extra_mcp_servers": {"sagent_chat": _sagent_mcp_server_entry(role_name)},
+        "subprocess_read_timeout_sec": subprocess_read_timeout_sec,
+    }
+    # CLI session-persistence (``--session-id``/``--resume``) keeps the prompt
+    # cache warm across turns, but it is an OPTIONAL optimization: sagent's tape is
+    # the source of truth (the provider rebuilds claude's on-disk session from it
+    # on the first turn, incl. after a restart once ``Agent.resume`` rehydrated the
+    # tape from ``session.jsonl``). sagent main dropped this option
+    # (``--no-session-persistence``), so pass it only if the provider's ``model()``
+    # still accepts it — forward-compatible with a session_id-less provider while
+    # keeping the warmth on one that supports it.
+    if "session_id" in inspect.signature(provider.model).parameters:
+        model_kwargs["session_id"] = _session_id_for(
+            role_name, namespace=session_namespace
+        )
+
     return Agent(
-        model=provider.model(
-            model_id,
-            extra_mcp_servers={"sagent_chat": _sagent_mcp_server_entry(role_name)},
-            # CLI session-persistence: ``--session-id``/``--resume`` keeps
-            # the prompt cache warm across turns. sagent's tape is the
-            # source of truth — the provider rebuilds the on-disk session
-            # from the tape on the first turn (including the first turn
-            # after a restart, once ``Agent.resume`` has rehydrated the
-            # tape from sagent's own ``session.jsonl``) and feeds only
-            # deltas thereafter. The claude-side file is a cache, never
-            # parsed back.
-            session_id=_session_id_for(role_name, namespace=session_namespace),
-            subprocess_read_timeout_sec=subprocess_read_timeout_sec,
-        ),
+        model=provider.model(model_id, **model_kwargs),
         model_spec=_model_spec_for(model_id),
         system=system_prompt,
         tools=list(tools),
