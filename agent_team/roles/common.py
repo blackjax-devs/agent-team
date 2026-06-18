@@ -358,10 +358,10 @@ def build_agent(
     # cache warm across turns, but it is an OPTIONAL optimization: sagent's tape is
     # the source of truth (the provider rebuilds claude's on-disk session from it
     # on the first turn, incl. after a restart once ``Agent.resume`` rehydrated the
-    # tape from ``session.jsonl``). sagent main dropped this option
-    # (``--no-session-persistence``), so pass it only if the provider's ``model()``
-    # still accepts it — forward-compatible with a session_id-less provider while
-    # keeping the warmth on one that supports it.
+    # tape from ``session.jsonl``). A transient sagent export regression once
+    # dropped this kwarg from ``model()`` (fixed upstream, #197/#198), so pass it
+    # only if the provider's ``model()`` still accepts it — defensive against a
+    # re-drop, with no behaviour change when it's present (the normal case).
     if "session_id" in inspect.signature(provider.model).parameters:
         model_kwargs["session_id"] = _session_id_for(
             role_name, namespace=session_namespace

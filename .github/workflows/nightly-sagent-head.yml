@@ -2,13 +2,13 @@ name: nightly-sagent-head
 
 # DRIFT DETECTOR (separate from CI on purpose).
 #
-# CI (ci.yml) tests against our PINNED, known-good sagent rev. This workflow
+# CI (ci.yml) tests against our PINNED, known-good sagent commit. This workflow
 # instead resolves sagent from main HEAD and runs the same suite PLUS the
-# boot-construct smoke, so we learn — nightly — when sagent main drifts away from
-# the API agent-team targets. (It already has: main's AnthropicCLI.model() dropped
-# extra_mcp_servers / session_id / subprocess_read_timeout_sec after the #177
-# merge, breaking the channel boot.) A FAILING run here is the signal to migrate
-# before we bump the pin. It gates nothing — own status, own badge.
+# provider-signature smoke, so we learn — nightly — if sagent main drifts away from
+# the API agent-team targets. (It caught exactly this once: a transient copybara
+# export bug dropped extra_mcp_servers / session_id / subprocess_read_timeout_sec
+# from model() — fixed upstream, #197 / PR #198.) A FAILING run here is the signal
+# that main regressed again before we bump the pin. It gates nothing — own status.
 #
 # How: rewrite the direct-URL sagent pin in pyproject.toml from @<rev> to @main so
 # `uv sync` re-resolves to current HEAD.

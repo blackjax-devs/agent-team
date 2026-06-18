@@ -2,20 +2,21 @@ name: CI
 
 # Triggers: every push/PR to main, plus a nightly schedule.
 #
-# agent-team pins sagent to a KNOWN-GOOD rev (direct-URL dep in pyproject.toml),
-# because main's provider API is mid-rework: main's AnthropicCLI.model() dropped
-# extra_mcp_servers / session_id / subprocess_read_timeout_sec, which
-# roles/common.py passes — so @main breaks the channel boot. This CI tests the
-# stable pinned rev; the separate nightly-sagent-head.yml resolves sagent main +
-# boot-constructs the agents to warn us when main drifts further.
+# agent-team pins sagent to a specific KNOWN-GOOD main commit (direct-URL dep in
+# pyproject.toml) for reproducible installs. A transient copybara export bug once
+# dropped extra_mcp_servers / session_id / subprocess_read_timeout_sec from
+# AnthropicCLI.model() (which roles/common.py passes) — fixed upstream (#197/#198),
+# but the machine export can hiccup, so we pin a commit rather than @main. This CI
+# tests the pinned commit; the separate nightly-sagent-head.yml resolves sagent
+# @main and re-checks the provider signature to warn us if a re-drop lands.
 #
-# Note the BOOT-CONSTRUCT smoke below: the import smoke alone does NOT call
-# provider.model(), so it missed exactly this kind of drift — _build_all_agents()
-# is what actually exercises the provider signature. (That gap let a @main bump
-# pass CI green while the channel failed to boot for a real user.)
+# Note the PROVIDER-SIGNATURE smoke below: the import smoke alone never calls
+# provider.model(), so it can't see a model() signature change — the signature
+# smoke (inspect AnthropicCLI.model) is what catches a dropped kwarg. The mock test
+# in tests/ covers the other half: that common.py still PASSES those kwargs.
 #
-# TODO(repin): once sagent stabilizes / ships >=0.1.7, switch the dep to a plain
-# `sagent>=0.1.7` (reproducible installs); the nightly can then just preview main.
+# TODO(repin): once sagent ships a PyPI release (>=0.1.7), switch the dep to a
+# plain `sagent>=0.1.7` (reproducible installs); the nightly can then just preview main.
 
 on:
   push:
