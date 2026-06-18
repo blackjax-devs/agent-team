@@ -62,6 +62,17 @@ done
 [ -d "$TARGET" ] || { echo "error: target directory does not exist: $TARGET" >&2; exit 1; }
 TARGET="$(cd "$TARGET" && pwd)"
 
+# Guard against a common footgun: running this from inside agent-pack/ with no
+# TARGET makes TARGET=$PWD=the pack's own source dir, so it would copy the agent
+# defs onto themselves ("skip (exists)") and scatter a stray .claude/checklists/
+# into the source. Refuse and point at the real usage.
+if [ "$TARGET" = "$SCRIPT_DIR" ]; then
+  echo "error: TARGET is the agent-pack's own source dir ($TARGET)." >&2
+  echo "       Pass the repo you want to install the team INTO, e.g.:" >&2
+  echo "         bash $0 /path/to/your-repo --workspace \"the BlackJAX library\"" >&2
+  exit 2
+fi
+
 if [ "$DOCS_MODE" -eq 1 ]; then
   CHECKLISTS_DST="$TARGET/docs/agent-checklists"
   CHECKLISTS_REL="docs/agent-checklists"
