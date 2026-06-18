@@ -40,6 +40,16 @@ uvx --from git+https://github.com/blackjax-devs/agent-team.git agent-team serve 
 uv sync                        # installs the package + the `agent-team` console script
 agent-team serve --port 8767   # or: python -m agent_team.serve --port 8767
 ```
+
+> **Run it in `tmux`.** However you launch it, `serve` is a foreground,
+> long-running process — start it inside a **tmux** (or `screen`) session so it
+> survives terminal/SSH disconnects and you can detach (`Ctrl-b` then `d`) and
+> reattach (`tmux attach -t agent-team`) without killing the team:
+> ```bash
+> tmux new -s agent-team
+> # …run the serve command above, then Ctrl-b d to detach; Ctrl-C in the window stops it
+> ```
+
 The bundled **default profile** ships inside the package, so it works out of the
 box from any cwd. To use a custom profile, set `AGENT_TEAM_PROFILE_DIR` to your
 profile dir. Per-session audit data (`main.jsonl`, `sessions/`) lands in the
