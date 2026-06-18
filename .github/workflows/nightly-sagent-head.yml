@@ -58,10 +58,11 @@ jobs:
       - name: Run test suite against sagent HEAD
         run: uvx --with-editable . --with pytest pytest -q
 
-      # The load-bearing check: BUILD the agents (calls provider.model() per role).
-      # This is what catches a model()-signature drift on main — the plain import
-      # smoke does not reach it.
-      - name: Boot-construct smoke against sagent HEAD
+      # The load-bearing check: assert sagent main's AnthropicCLI.model() still
+      # accepts the kwargs roles/common.py passes. This is what catches a model()
+      # signature drift on main — the plain import smoke does not reach it. (Right
+      # now this is EXPECTED TO FAIL: main's export dropped all three kwargs. A red
+      # run here = main still incompatible; do not bump the pin.)
+      - name: Provider signature smoke against sagent HEAD
         run: |
-          cd "$RUNNER_TEMP"
-          SAGENT_DATA_DIR="$RUNNER_TEMP/data" uv run --project "$GITHUB_WORKSPACE" python -c "from agent_team.team_profile import load_profile; from agent_team.serve import _build_all_agents; a=_build_all_agents(load_profile()); assert len(a)==5, a; print('boot-construct OK:', sorted(a))"
+          uv run python -c "import inspect; from sagent.providers import AnthropicCLI; have=set(inspect.signature(AnthropicCLI.model).parameters); need={'extra_mcp_servers','session_id','subprocess_read_timeout_sec'}; miss=need-have; assert not miss, f'sagent main AnthropicCLI.model() is missing: {sorted(miss)} — agent-team cannot migrate yet'; print('provider model() signature OK on main:', sorted(need))"

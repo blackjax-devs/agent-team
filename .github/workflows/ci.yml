@@ -57,14 +57,15 @@ jobs:
           cd "$RUNNER_TEMP"
           uv run --project "$GITHUB_WORKSPACE" python -c "import agent_team; from agent_team.team_profile import load_profile; load_profile(); from agent_team.serve import main; assert callable(main)"
 
-      # Boot-construct smoke: actually BUILD all agents (calls provider.model()
-      # per role — the provider-signature surface). The import smoke above never
-      # reaches this, so it cannot catch a sagent model() signature change; this
-      # step can. No claude subprocess is spawned (that starts on the first turn).
-      - name: Boot-construct smoke
+      # Provider-signature smoke: assert sagent's AnthropicCLI.model() still
+      # accepts the kwargs roles/common.py passes. A full _build_all_agents()
+      # would need claude credentials (AnthropicCLI.from_credentials()), which CI
+      # lacks — but the drift that bit us is a model() SIGNATURE change, and this
+      # catches that headlessly. (The @main export that dropped extra_mcp_servers
+      # fails here; the import smoke above never reaches provider.model().)
+      - name: Provider signature smoke
         run: |
-          cd "$RUNNER_TEMP"
-          SAGENT_DATA_DIR="$RUNNER_TEMP/data" uv run --project "$GITHUB_WORKSPACE" python -c "from agent_team.team_profile import load_profile; from agent_team.serve import _build_all_agents; a=_build_all_agents(load_profile()); assert sorted(a)==['junior-swe','statistician','swe','tech-writer','tl'], a; print('boot-construct OK:', sorted(a))"
+          uv run python -c "import inspect; from sagent.providers import AnthropicCLI; have=set(inspect.signature(AnthropicCLI.model).parameters); need={'extra_mcp_servers','session_id','subprocess_read_timeout_sec'}; miss=need-have; assert not miss, f'sagent AnthropicCLI.model() dropped kwargs agent-team passes: {sorted(miss)}'; print('provider model() signature OK:', sorted(need))"
 
       # Console-script smoke: --help must print usage and exit 0 without booting.
       - name: Console script --help
