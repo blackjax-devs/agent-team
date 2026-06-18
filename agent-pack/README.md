@@ -47,30 +47,48 @@ A shared `AGENT_CHECKLIST.md` (process discipline) installs alongside them.
 
 ## Install
 
-From anywhere, point `setup.sh` at the repo you want the team in:
+`setup.sh` installs the pack **into a target repo** — the repo you want the team
+to work on. Pass that repo as the first argument (the `TARGET`), and set
+`--workspace`:
 
 ```bash
-bash setup.sh /path/to/your/repo
+bash /path/to/agent-pack/setup.sh  <TARGET-REPO>  --workspace "DESCRIPTION"
 ```
 
-This copies the agent defs into `<your-repo>/.claude/agents/` and the
-methodology checklists into `<your-repo>/.claude/checklists/`. It is idempotent
-and never destructive — it refuses to overwrite an existing file unless you pass
-`--force`, and it never deletes anything.
+It copies the agent defs into `<TARGET>/.claude/agents/` and the methodology
+checklists into `<TARGET>/.claude/checklists/`. Idempotent and non-destructive:
+it refuses to overwrite without `--force` and never deletes anything.
 
-Options:
+> **`TARGET` is the repo you install *into*, resolved relative to your cwd.** So
+> from `~/test1`, `setup.sh blackjax …` installs into `~/test1/blackjax/`. The
+> script **refuses to install into the pack's own source dir** — a common slip
+> when you run it from *inside* `agent-pack/` with no target (it would otherwise
+> copy the agent defs onto themselves). Run it from your repo root, or pass an
+> explicit target.
+
+### `--workspace` — set it (it scopes the whole team)
+
+`--workspace "DESC"` fills the `{{WORKSPACE}}` placeholder in every agent prompt,
+telling the team *what it's working on*. This drives how the Tech Lead routes the
+work, so a vague or wrong description mis-scopes everything. Omit it and you get a
+generic "a repository that uses BlackJAX" line.
+
+- **An app that uses BlackJAX** (the common case):
+  `--workspace "my-app, a Stan-to-BlackJAX port of a hierarchical model"`
+- **The BlackJAX library itself** (e.g. reviewing a sampler PR) — say so explicitly,
+  or the agents assume you're debugging a *user's* app, not library internals:
+  `--workspace "the BlackJAX probabilistic-programming library (JAX-based MCMC/VI)"`
+
+Verify it took: the top of `<TARGET>/.claude/agents/tl.md` should echo your
+description.
+
+### Other options
 
 ```bash
-bash setup.sh                                   # install into the current directory
-bash setup.sh ../my-app                         # install into a sibling repo
-bash setup.sh ../my-app --workspace "my-app, a Stan-to-BlackJAX port"
 bash setup.sh ../my-app --force                 # overwrite an earlier install
 bash setup.sh ../my-app --docs                  # checklists under docs/agent-checklists/ instead
+bash setup.sh                                    # install into the current dir (run from your repo root)
 ```
-
-`--workspace "DESC"` fills the `{{WORKSPACE}}` placeholder in each agent's prompt
-so the team knows what it's working on. Omit it and the agents default to a
-generic "a repository that uses BlackJAX" line.
 
 ## Invoke
 
