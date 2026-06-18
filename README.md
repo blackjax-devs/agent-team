@@ -26,10 +26,19 @@ Both share the same roles, methodology, and workspace config; only the runtime d
 - Loopback-only HTTP; write-capable roles are sandboxed.
 
 ## Quickstart (channel) — provisional
+
+**No clone — one line** (runs the server straight from GitHub; sagent comes along
+via the direct-URL dep, no extra flags):
 ```bash
-uv sync                      # installs the package + the `agent-team` console script
-agent-team serve --port 8767   # or: python -m agent_team.serve --port 8767
+uvx --from git+https://github.com/blackjax-devs/agent-team.git agent-team serve --port 8767
 # UI at http://127.0.0.1:8767/
+# persistent install instead:  uv tool install git+https://github.com/blackjax-devs/agent-team.git
+```
+
+**From a clone** (for development or a custom profile):
+```bash
+uv sync                        # installs the package + the `agent-team` console script
+agent-team serve --port 8767   # or: python -m agent_team.serve --port 8767
 ```
 The bundled **default profile** ships inside the package, so it works out of the
 box from any cwd. To use a custom profile, set `AGENT_TEAM_PROFILE_DIR` to your

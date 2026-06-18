@@ -2,19 +2,18 @@ name: CI
 
 # Triggers: every push/PR to main, plus a nightly schedule.
 #
-# Why the nightly run exists: sagent is pinned to a git ref (see
-# pyproject.toml -> [tool.uv.sources]), not a released PyPI version, so its
-# API can drift under us between our own commits. The #177 churn
-# (session_id / subprocess_read_timeout_sec on model(), the
-# CancelledError->SIGINT interrupt path) showed that upstream changes can
-# silently break the channel. The nightly job re-runs `uv sync` against the
-# pinned ref and exercises the import smoke + test suite so we catch that
-# drift early instead of at the next feature push.
+# agent-team TRACKS sagent main (a direct-URL dep in pyproject.toml, no lock pin),
+# so every `uv sync` here re-resolves to the current main HEAD. That makes this CI
+# the drift detector: if a sagent main commit breaks our API usage (the #177
+# surface — session_id / subprocess_read_timeout_sec on model(), the
+# CancelledError->SIGINT interrupt path — or anything after), CI goes red on the
+# next push or the nightly run rather than silently at a future feature push.
+# (This replaces the old separate nightly-sagent-head drift workflow, now that
+# the default dep IS main.)
 #
 # TODO(repin): once sagent ships the merged provider work in a PyPI release
-# (>=0.1.7), drop the git pin in pyproject.toml's [tool.uv.sources] and
-# depend on `sagent>=0.1.7` directly. At that point this nightly job can be
-# relaxed (the API surface stops moving under us).
+# (>=0.1.7), switch the dep to a plain `sagent>=0.1.7` for reproducible installs;
+# a nightly can then preview main rather than being load-bearing.
 
 on:
   push:
@@ -39,7 +38,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
-      # sagent comes from the git-ref pin in pyproject.toml ([tool.uv.sources]).
+      # sagent is a direct-URL dep tracking main (pyproject.toml); uv re-resolves
+      # it to the current HEAD (no lock pin), so this run reflects live main.
       - name: Sync dependencies
         run: uv sync
 

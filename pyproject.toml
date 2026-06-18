@@ -6,11 +6,14 @@ requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "MIT" }
 dependencies = [
-    # sagent: pinned to merged main (PR #177) until a PyPI release (>=0.1.7)
-    # ships the merged provider work — session_id / subprocess_read_timeout_sec
-    # on model(), and the CancelledError->SIGINT interrupt path. PyPI 0.1.6
-    # predates it, so a plain `sagent>=0.1.6` pin would break the channel.
-    "sagent",
+    # sagent: tracked at upstream main via a DIRECT URL (not [tool.uv.sources]),
+    # so the pin TRAVELS with a from-git install — `uvx --from git+…/agent-team`
+    # and `uv tool install git+…/agent-team` resolve sagent from main too, no
+    # `--with` override needed. PyPI 0.1.6 predates the merged provider work
+    # (PR #177: session_id / subprocess_read_timeout_sec on model(), the
+    # CancelledError->SIGINT interrupt path), so the PyPI release won't work yet.
+    # Once sagent ships >=0.1.7, switch this to a plain "sagent>=0.1.7".
+    "sagent @ git+https://github.com/rekursiv-ai/sagent.git@main",
     "starlette",
     "uvicorn",
     "mcp",
@@ -19,9 +22,6 @@ dependencies = [
 [project.scripts]
 agent-team = "agent_team.serve:main"
 agent-team-merge = "agent_team.merge_jsonl:main"
-
-[tool.uv.sources]
-sagent = { git = "https://github.com/rekursiv-ai/sagent.git", rev = "06603e217ad9c445fe3d23c8d5346aa893b734b8" }
 
 [build-system]
 requires = ["setuptools>=61"]
