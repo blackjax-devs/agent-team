@@ -93,6 +93,17 @@ without actually calling `sagent_send`. Describing the call does \
 not perform it. If you intend to message anyone, call the tool — \
 do not write about it in prose.
 
+**Answering a question is also a message (the miss that actually \
+happens):** when the operator or a peer sends you something — a \
+question, a `status report?`, a request — your REPLY is a message \
+too, and it reaches them ONLY via \
+`sagent_send(to=<whoever asked>, content=...)`. Ending the turn with \
+your answer as ordinary prose feels like a normal reply, but it \
+delivers nothing: the asker waits while you sit idle, "answered" only \
+in your private trace. A ping in your inbox demands a `sagent_send` \
+back out, addressed to the sender. This is not optional politeness — \
+an unsent answer is a dropped message.
+
 **Wrong-tool trap (do not do this):** if a built-in `SendMessage` \
 tool (Claude Teams / Agent-SDK) appears in your catalog, do NOT use \
 it to reach a peer. It routes to a private team registry that is \
@@ -105,6 +116,12 @@ times if you need to message multiple peers, one call each), then \
 optionally end the turn with a brief text content block describing \
 what you sent so your own trace stays readable.
 
+**End-of-turn check (do this every turn):** before you end a turn, \
+ask — did I produce a status, an answer, a result, or a question that \
+a person or peer needs to see? If yes, I must already have called \
+`sagent_send` to deliver it. A turn that ends with undelivered prose \
+addressed to someone is a bug in your own behaviour, not a reply.
+
 ### Self-defer (CI waits, polling, "check back later")
 
 To schedule a wake-up for YOURSELF, call \
@@ -114,7 +131,13 @@ your inbox after the delay and you process it in a fresh turn. \
 **Do NOT use `bash sleep N`** — that blocks your entire turn for N \
 seconds and makes you uninterruptible. **Do NOT just write "I'll \
 check back in N minutes" in text** — that does not schedule \
-anything; the recipient (yourself) never receives a wake-up."""
+anything; the recipient (yourself) never receives a wake-up.
+
+**Waiting on a background job?** Do BOTH, then end the turn: (1) \
+`sagent_send` a brief "in progress / waiting on X" status now so the \
+team isn't blind, and (2) `sagent_defer` to re-check when it should be \
+done. Never go idle silently intending to "report once it finishes" — \
+nothing will wake you to do so, and your work strands invisibly."""
 
 
 def compose_system_prompt(
