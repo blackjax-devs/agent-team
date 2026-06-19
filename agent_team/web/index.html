@@ -219,6 +219,13 @@
     padding: 16px 20px;
   }
   .msg.filtered { display: none; }
+  /* Conversation focus: every message to/from the member whose trace is open
+     (click any member in the left panel — incl. @user — to focus its
+     conversation). --hl-color is set to that role's colour in JS. */
+  .msg.role-hl {
+    background: color-mix(in srgb, var(--hl-color, var(--role-default)) 14%, transparent);
+    box-shadow: inset 3px 0 0 var(--hl-color, var(--role-default));
+  }
   .msg {
     display: grid;
     grid-template-columns: auto 1fr;
@@ -783,7 +790,14 @@ function renderBody(text) {
   return s;
 }
 
+function isSelfMessage(msg) {
+  // from === only recipient(s): sagent_defer wake-ups / self-pings. Feed noise.
+  const to = msg.to || [];
+  return to.length > 0 && to.every(r => r === msg.from);
+}
+
 function msgMatchesFilter(msg) {
+  if (isSelfMessage(msg)) return false;     // always hide self-messages
   if (filterFrom && msg.from !== filterFrom) return false;
   if (filterTo) {
     const matched = (msg.to || []).some(r => r === filterTo || r === 'all');
@@ -837,6 +851,23 @@ function rebuildVisibility() {
   updateFilterStats();
 }
 
+function messageInvolves(msg, role) {
+  return !!role && (msg.from === role || (msg.to || []).some(r => r === role));
+}
+
+// Conversation focus: tint every message to/from the member whose trace is
+// open (traceRole). Driven by openTrace/closeTrace; new rows get tinted in
+// renderMessage. Clicking @user in the members panel focuses the operator
+// conversation, so no separate always-on user styling is needed.
+function applyRoleHighlight() {
+  messagesEl.style.setProperty('--hl-color',
+    traceRole ? roleColor(traceRole) : 'transparent');
+  for (const row of messagesEl.children) {
+    if (!row._msg) continue;
+    row.classList.toggle('role-hl', messageInvolves(row._msg, traceRole));
+  }
+}
+
 function renderMessage(msg) {
   const continued =
     msg.from === lastFromRole && sameRecipients(msg.to, lastTo);
@@ -870,6 +901,7 @@ function renderMessage(msg) {
   });
 
   messagesEl.appendChild(row);
+  if (messageInvolves(msg, traceRole)) row.classList.add('role-hl');
   applyFilterToRow(row, msg);
   if (!row.classList.contains('filtered')) {
     lastFromRole = msg.from;
@@ -1297,6 +1329,7 @@ function closeTrace() {
   traceTotal = 0;
   document.querySelectorAll('.member.active')
           .forEach(el => el.classList.remove('active'));
+  applyRoleHighlight();
 }
 $('trace-close').addEventListener('click', closeTrace);
 
@@ -1358,13 +1391,16 @@ async function openTrace(role) {
           .forEach(el => el.classList.remove('active'));
   const m = document.querySelector(`.member[data-role="${role}"]`);
   if (m) m.classList.add('active');
+  applyRoleHighlight();
 
   try {
     const r = await fetch(`/api/trace/${role}?limit=2000`);
     if (r.status === 404) {
-      traceBody.innerHTML =
-        `<div class="ev">no trace file at sessions/${role}.trace.jsonl
-         <br>(check that trace_writer.install_on() ran for this role)</div>`;
+      traceBody.innerHTML = (role === 'user' || role === 'system')
+        ? `<div class="ev">@${role} has no trace of its own —
+           its messages are highlighted in the feed.</div>`
+        : `<div class="ev">no trace file at sessions/${role}.trace.jsonl
+           <br>(check that trace_writer.install_on() ran for this role)</div>`;
       return;
     }
     const data = await r.json();
