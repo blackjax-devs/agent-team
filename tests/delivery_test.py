@@ -61,3 +61,51 @@ def test_cancel_all_deferred_returns_zero_in_http_bridge_mode():
     # The in-process scheduler has been replaced by the HTTP bridge;
     # cancel_all_deferred is now a stable-API no-op.
     assert delivery.cancel_all_deferred() == 0
+
+
+# --- route_send urgent flag --------------------------------------------------
+# route_send is HTTP-bridged, but the urgent branch carries real logic (it must
+# pass urgent ON the same /api/post call — not a second /api/interrupt — and
+# interpret was_in_flight). Mock the single HTTP boundary (_http_post) so we
+# test that logic, not urllib.
+
+
+def _fake_post(monkeypatch, response: dict):
+    calls = []
+
+    def fake(path, payload):
+        calls.append((path, payload))
+        return True, json.dumps(response), 200
+
+    monkeypatch.setattr(delivery, "_http_post", fake)
+    return calls
+
+
+def test_route_send_default_queues_and_passes_urgent_false(monkeypatch):
+    calls = _fake_post(monkeypatch, {"ok": True, "was_in_flight": None})
+    ok, status = delivery.route_send(from_role="tl", to="swe", content="hi")
+    assert ok
+    # Single /api/post call carrying urgent=False; no second endpoint.
+    assert [p for p, _ in calls] == ["/api/post"]
+    assert calls[0][1] == {"from": "tl", "to": "swe", "body": "hi", "urgent": False}
+    assert "Delivered to swe" in status and "halted" not in status
+
+
+def test_route_send_urgent_is_single_post_and_reports_halt(monkeypatch):
+    calls = _fake_post(monkeypatch, {"ok": True, "was_in_flight": True})
+    ok, status = delivery.route_send(
+        from_role="statistician", to="swe", content="STOP — wrong option", urgent=True
+    )
+    assert ok
+    # urgent is one POST to /api/post (server composes the halt), NOT a
+    # separate /api/interrupt call — that was the UI bug we are not repeating.
+    assert [p for p, _ in calls] == ["/api/post"]
+    assert calls[0][1]["urgent"] is True
+    assert "halted its in-flight turn" in status
+
+
+def test_route_send_urgent_recipient_idle_reports_queued(monkeypatch):
+    _fake_post(monkeypatch, {"ok": True, "was_in_flight": False})
+    ok, status = delivery.route_send(from_role="tl", to="swe", content="x", urgent=True)
+    assert ok
+    assert "was idle" in status

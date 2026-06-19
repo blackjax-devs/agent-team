@@ -165,6 +165,7 @@ def route_send(
     from_role: str,
     to: str,
     content: str,
+    urgent: bool = False,
     suppress_audit: bool = False,
 ) -> tuple[bool, str]:
     """Deliver a peer message via ``serve.py``'s ``/api/post``.
@@ -173,22 +174,38 @@ def route_send(
     ``ToolResult``. ``suppress_audit`` is ignored here — the sentinel
     file is the single source of truth and is checked server-side.
 
+    When ``urgent`` is True we pass ``urgent`` on the SAME ``/api/post``
+    call. Server-side, the handler buffers the message in the recipient's
+    inbox and then halts its in-flight turn (``Agent.halt`` — model_call
+    cancelled, history PRESERVED) so it drains and acts on this message
+    immediately, instead of only after its current turn finishes. The halt
+    targets the *recipient*, not the caller, so the sending agent's own turn
+    is unaffected. This is the single composition point both the web UI and
+    this MCP tool route through — there is no separate two-step call here.
+
     The HTTP roundtrip is local (127.0.0.1) and small (<1KB typical
     body), so latency is negligible compared to model-call latency.
     """
     ok, body, status = _http_post(
         "/api/post",
-        {"from": from_role, "to": to, "body": content},
+        {"from": from_role, "to": to, "body": content, "urgent": urgent},
     )
-    if ok:
-        try:
-            parsed = json.loads(body)
-        except json.JSONDecodeError:
-            parsed = {}
-        if parsed.get("ok"):
-            return True, f"Delivered to {to}."
+    if not ok:
+        return False, f"delivery failed (HTTP {status}): {body}"
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        parsed = {}
+    if not parsed.get("ok"):
         return False, body or f"HTTP {status}"
-    return False, f"delivery failed (HTTP {status}): {body}"
+    if not urgent:
+        return True, f"Delivered to {to}."
+    # urgent: /api/post buffered the message then halted the recipient.
+    # Report whether a turn was actually halted so the model knows if its
+    # message landed now (was_in_flight) or merely queued (idle recipient).
+    if parsed.get("was_in_flight"):
+        return True, f"Delivered to {to} + halted its in-flight turn (acting on it now)."
+    return True, f"Delivered to {to} (was idle; nothing to halt — acts on its next turn)."
 
 
 def schedule_defer(

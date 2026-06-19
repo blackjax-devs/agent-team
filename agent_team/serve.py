@@ -938,7 +938,7 @@ def _build_http_app(agents):
     async def post(request: Request) -> Response:
         """Operator ingress + cross-process peer routing.
 
-        Body shape: ``{to, body, from?}``.
+        Body shape: ``{to, body, from?, urgent?}``.
 
           - ``from`` absent or ``"user"``: operator ingress. Writes a
             ``user → [to]`` audit record and pushes ``UserMessage``
@@ -959,6 +959,7 @@ def _build_http_app(agents):
         to = str(payload.get("to", "")).strip()
         body = str(payload.get("body", ""))
         from_role = str(payload.get("from", "user")).strip() or "user"
+        urgent = bool(payload.get("urgent", False))
         if not to or not body:
             return JSONResponse(
                 {"error": "both 'to' and 'body' are required"}, status_code=400
@@ -994,7 +995,31 @@ def _build_http_app(agents):
                         text=body,
                     ),
                 )
-        return JSONResponse({"ok": True, "to": to, "from": from_role})
+        # ``urgent``: re-adds the per-message preempt UX sagent removed
+        # upstream, entirely host-side. The message was buffered above; now
+        # halt the recipient's in-flight turn (``Agent.halt()`` — cancels the
+        # model_call, PRESERVES history) so it drains and acts on the buffered
+        # message immediately instead of after its current turn. This is the
+        # SINGLE composition point both the web UI and the ``sagent_send`` MCP
+        # tool (``urgent=true``) route through — neither does a separate
+        # /api/interrupt call. ``was_in_flight`` lets the caller tell "halted a
+        # live turn" from "recipient was idle (message merely queued)".
+        was_in_flight: object = None
+        if urgent and to != "user":
+            try:
+                was_in_flight = target.runtime.model_call is not None
+                target.halt()
+            except Exception as exc:  # noqa: BLE001 — report, don't 500 the post
+                was_in_flight = f"halt-failed: {type(exc).__name__}: {exc}"
+        return JSONResponse(
+            {
+                "ok": True,
+                "to": to,
+                "from": from_role,
+                "urgent": urgent,
+                "was_in_flight": was_in_flight,
+            }
+        )
 
     async def defer(request: Request) -> Response:
         """Operator-side + MCP-server-side wake-up scheduling.

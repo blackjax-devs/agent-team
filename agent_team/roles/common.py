@@ -116,6 +116,15 @@ times if you need to message multiple peers, one call each), then \
 optionally end the turn with a brief text content block describing \
 what you sent so your own trace stays readable.
 
+**Interrupting a peer (`urgent=true`).** `sagent_send` takes an \
+optional `urgent` flag. By default messages QUEUE — the recipient \
+sees them on their next turn. With `urgent=true` the recipient's \
+in-flight turn is HALTED (history preserved) and they act on your \
+message immediately. Use it SPARINGLY — only when a peer is actively \
+going the wrong way and must stop now; in particular, to **correct a \
+previous, wrong message you sent** that they are about to act on. \
+Normal coordination is `urgent=false`.
+
 **End-of-turn check (do this every turn):** before you end a turn, \
 ask — did I produce a status, an answer, a result, or a question that \
 a person or peer needs to see? If yes, I must already have called \

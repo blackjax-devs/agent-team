@@ -1112,29 +1112,20 @@ async function sendMessage() {
     // Fan-out: sagent's /api/post is single-target. CC by issuing one
     // POST per recipient. The audit log records one entry per delivery,
     // which matches sagent's per-target inbox semantics.
+    // 'urgent' is honored server-side by /api/post: it buffers the message
+    // then halts the recipient's in-flight turn (Agent.halt, history kept) so
+    // they act on it immediately instead of after their current turn. This is
+    // the SAME single route the sagent_send MCP tool (urgent=true) uses — the
+    // server is the one composition point, so the UI never calls /api/interrupt.
     const results = await Promise.all(recipients.map(to =>
       fetch('/api/post', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to, body }),
+        body: JSON.stringify({ to, body, urgent }),
       })
     ));
     const bad = results.find(r => !r.ok);
     if (bad) throw new Error(await bad.text());
-    // Interrupt is a SEPARATE host-side endpoint (/api/interrupt -> Agent.halt),
-    // NOT a flag on /api/post — the server ignores 'urgent'. Two-step flow: the
-    // post above buffers the message in the recipient's inbox; this then aborts
-    // their in-flight turn so they drain and act on the buffered message
-    // immediately, instead of only after the current turn finishes.
-    if (urgent) {
-      await Promise.all(recipients.map(to =>
-        fetch('/api/interrupt', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ role: to }),
-        })
-      ));
-    }
     inputEl.value = '';
     autoResize();
   } catch (e) {

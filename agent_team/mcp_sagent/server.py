@@ -136,8 +136,14 @@ async def list_tools() -> list[mcp_types.Tool]:
                 "channel. Use 'to' for the peer label (e.g. 'swe', 'tl', "
                 "'user') and 'content' for the message body. This is the "
                 "ONLY way to deliver a message to a peer — your assistant "
-                "text is for thinking, not for routing. The recipient sees "
-                "your message on their next turn."
+                "text is for thinking, not for routing. The recipient "
+                "normally sees your message on their NEXT turn. Set "
+                "urgent=true to HALT the recipient's current work so they "
+                "act on this message immediately — use SPARINGLY, only when "
+                "a peer is actively going the wrong way and must stop now; "
+                "in particular, use it to correct a previous, wrong message "
+                "you sent that they are about to act on. Normal coordination "
+                "is urgent=false (queued)."
             ),
             inputSchema={
                 "type": "object",
@@ -151,6 +157,18 @@ async def list_tools() -> list[mcp_types.Tool]:
                     "content": {
                         "type": "string",
                         "description": "Message body to deliver to the peer.",
+                    },
+                    "urgent": {
+                        "type": "boolean",
+                        "description": (
+                            "Default false (message queues for the "
+                            "recipient's next turn). If true, HALT the "
+                            "recipient's in-flight turn so they act on this "
+                            "message NOW. Use sparingly — only to stop a peer "
+                            "actively going the wrong way, e.g. to correct a "
+                            "previous wrong message you sent that they are "
+                            "about to act on."
+                        ),
                     },
                 },
                 "required": ["to", "content"],
@@ -245,6 +263,7 @@ async def call_tool(
     if name == "sagent_send":
         to = str(arguments.get("to", "")).strip()
         content = str(arguments.get("content", ""))
+        urgent = bool(arguments.get("urgent", False))
         if not to:
             return _text("[Error] 'to' is required.", is_error=True)
         if not content:
@@ -253,6 +272,7 @@ async def call_tool(
             from_role=sender,
             to=to,
             content=content,
+            urgent=urgent,
             suppress_audit=suppress,
         )
         _debug(f"  route_send -> ok={ok} status={status!r}")
