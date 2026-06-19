@@ -91,21 +91,18 @@ def test_route_send_default_queues_and_passes_urgent_false(monkeypatch):
     assert "Delivered to swe" in status and "halted" not in status
 
 
-def test_route_send_urgent_is_single_post_and_reports_halt(monkeypatch):
-    calls = _fake_post(monkeypatch, {"ok": True, "was_in_flight": True})
+def test_route_send_urgent_is_single_post_and_reports_disabled(monkeypatch):
+    # urgent preempt is DISABLED host-side (2026-06-19): the flag still rides one
+    # /api/post call (no second endpoint), but the status reports queued/disabled
+    # — never "halted" — regardless of what the server returns.
+    calls = _fake_post(
+        monkeypatch, {"ok": True, "was_in_flight": None, "urgent_halt_disabled": True}
+    )
     ok, status = delivery.route_send(
         from_role="statistician", to="swe", content="STOP — wrong option", urgent=True
     )
     assert ok
-    # urgent is one POST to /api/post (server composes the halt), NOT a
-    # separate /api/interrupt call — that was the UI bug we are not repeating.
     assert [p for p, _ in calls] == ["/api/post"]
     assert calls[0][1]["urgent"] is True
-    assert "halted its in-flight turn" in status
-
-
-def test_route_send_urgent_recipient_idle_reports_queued(monkeypatch):
-    _fake_post(monkeypatch, {"ok": True, "was_in_flight": False})
-    ok, status = delivery.route_send(from_role="tl", to="swe", content="x", urgent=True)
-    assert ok
-    assert "was idle" in status
+    assert "disabled" in status.lower()
+    assert "halted" not in status.lower()

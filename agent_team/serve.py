@@ -995,29 +995,34 @@ def _build_http_app(agents):
                         text=body,
                     ),
                 )
-        # ``urgent``: re-adds the per-message preempt UX sagent removed
-        # upstream, entirely host-side. The message was buffered above; now
-        # halt the recipient's in-flight turn (``Agent.halt()`` — cancels the
-        # model_call, PRESERVES history) so it drains and acts on the buffered
-        # message immediately instead of after its current turn. This is the
-        # SINGLE composition point both the web UI and the ``sagent_send`` MCP
-        # tool (``urgent=true``) route through — neither does a separate
-        # /api/interrupt call. ``was_in_flight`` lets the caller tell "halted a
-        # live turn" from "recipient was idle (message merely queued)".
-        was_in_flight: object = None
+        # ``urgent`` — DISABLED 2026-06-19 (queues only; does NOT preempt).
+        # Intended behaviour was to ``Agent.halt()`` the recipient's in-flight
+        # turn so it acts on this message now. But halt() SIGINTs the CLI
+        # subprocess mid-MCP-session and leaves the streamable-http bridge wedged:
+        # every later turn fails "MCP bridge catalog not fetched", recoverable only
+        # by a full restart (observed: swe 10:22, tech-writer 13:44 UTC). The CLI
+        # session-persistent cancel path SIGINTs the subprocess but doesn't reset
+        # the bridge (unlike the stateless path) — but whether that's an upstream
+        # bug or intended is unresolved: the maintainer notes API-mode interrupts
+        # deliberately DON'T halt (messages stack), so no-preempt may be by design.
+        # Either way, calling halt() here wedges us, so we do NOT: the message is
+        # still delivered (queued above), it just won't preempt. Re-enable the halt
+        # call only once upstream confirms+fixes the CLI bridge-reset. See worklog
+        # 2026-06-19 large-tape-mcp-connect-wedge lesson + the halt-wedge decision.
         if urgent and to != "user":
-            try:
-                was_in_flight = target.runtime.model_call is not None
-                target.halt()
-            except Exception as exc:  # noqa: BLE001 — report, don't 500 the post
-                was_in_flight = f"halt-failed: {type(exc).__name__}: {exc}"
+            _LOG.warning(
+                "urgent=true to %r: halt is DISABLED (wedges the MCP bridge, "
+                "pending upstream fix) — message queued, not preempted",
+                to,
+            )
         return JSONResponse(
             {
                 "ok": True,
                 "to": to,
                 "from": from_role,
                 "urgent": urgent,
-                "was_in_flight": was_in_flight,
+                "was_in_flight": None,  # halt disabled; nothing is ever preempted
+                "urgent_halt_disabled": bool(urgent),
             }
         )
 

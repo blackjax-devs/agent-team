@@ -652,22 +652,21 @@
           <div id="to-popover" class="popover" hidden></div>
         </div>
         <textarea id="input"
-          placeholder="Message the team  (Enter to queue, Shift+Enter for newline, Ctrl+Enter to interrupt)"
+          placeholder="Message the team  (Enter to send, Shift+Enter for newline)"
           rows="1"></textarea>
         <button id="urgent-toggle" type="button" class="toggle"
-                title="When ON, the next message INTERRUPTS the recipient's in-flight turn instead of queuing.">
-          interrupt: off
+                title="Interrupt is temporarily DISABLED — sends queue normally and do NOT preempt the recipient (the halt path wedges them; pending upstream review).">
+          interrupt: off (disabled)
         </button>
         <button id="send-btn">Send</button>
       </div>
       <div class="hint">
         Posts as <code>user</code>. To: comma-separated roles (e.g.
         <code>statistician, tl</code> CCs both via fan-out POSTs).
-        <strong>Interrupt</strong> off (default) → message queues until
-        recipient's current turn finishes. <strong>Interrupt</strong> on
-        or <kbd>Ctrl</kbd>+<kbd>Enter</kbd> → recipient's in-flight
-        subprocess is SIGINTed to make room. Use sparingly: every
-        interrupt discards the recipient's in-flight work.
+        <strong>Interrupt is temporarily disabled</strong> — every send
+        queues until the recipient's current turn finishes (the toggle /
+        <kbd>Ctrl</kbd>+<kbd>Enter</kbd> have no effect). The halt path
+        wedged recipients' MCP bridge; re-enabled once fixed upstream.
       </div>
     </div>
   </section>
@@ -1281,10 +1280,10 @@ sendBtn.addEventListener('click', sendMessage);
 const urgentToggleEl = document.getElementById('urgent-toggle');
 urgentToggleEl.addEventListener('click', () => {
   const wasActive = urgentToggleEl.classList.toggle('active');
-  urgentToggleEl.textContent = 'interrupt: ' + (wasActive ? 'on' : 'off');
-  urgentToggleEl.title = wasActive
-    ? 'Every send will INTERRUPT until you click to turn it off.'
-    : 'When ON, sends INTERRUPT recipient. Ctrl+Enter is a per-message override.';
+  urgentToggleEl.textContent = 'interrupt: ' + (wasActive ? 'on' : 'off') + ' (disabled)';
+  urgentToggleEl.title =
+    'Interrupt is temporarily DISABLED — the flag is sent but the server ignores it; '
+    + 'messages queue and do not preempt (the halt path wedges recipients; pending upstream review).';
 });
 
 // --- trace panel -----------------------------------------------------

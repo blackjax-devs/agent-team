@@ -136,14 +136,11 @@ async def list_tools() -> list[mcp_types.Tool]:
                 "channel. Use 'to' for the peer label (e.g. 'swe', 'tl', "
                 "'user') and 'content' for the message body. This is the "
                 "ONLY way to deliver a message to a peer — your assistant "
-                "text is for thinking, not for routing. The recipient "
-                "normally sees your message on their NEXT turn. Set "
-                "urgent=true to HALT the recipient's current work so they "
-                "act on this message immediately — use SPARINGLY, only when "
-                "a peer is actively going the wrong way and must stop now; "
-                "in particular, use it to correct a previous, wrong message "
-                "you sent that they are about to act on. Normal coordination "
-                "is urgent=false (queued)."
+                "text is for thinking, not for routing. The recipient sees "
+                "your message on their NEXT turn. (The `urgent` flag is "
+                "temporarily disabled — it queues like a normal send and does "
+                "NOT preempt — so to redirect a peer, just send normally and "
+                "they'll act on it next turn.)"
             ),
             inputSchema={
                 "type": "object",
@@ -161,13 +158,12 @@ async def list_tools() -> list[mcp_types.Tool]:
                     "urgent": {
                         "type": "boolean",
                         "description": (
-                            "Default false (message queues for the "
-                            "recipient's next turn). If true, HALT the "
-                            "recipient's in-flight turn so they act on this "
-                            "message NOW. Use sparingly — only to stop a peer "
-                            "actively going the wrong way, e.g. to correct a "
-                            "previous wrong message you sent that they are "
-                            "about to act on."
+                            "TEMPORARILY DISABLED (2026-06-19): currently "
+                            "behaves exactly like a normal send — the message "
+                            "QUEUES, it does NOT preempt the recipient's turn "
+                            "(the halt mechanism wedges them; disabled pending "
+                            "upstream review). Setting it is harmless but has "
+                            "no effect."
                         ),
                     },
                 },

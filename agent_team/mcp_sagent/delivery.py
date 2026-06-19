@@ -200,12 +200,13 @@ def route_send(
         return False, body or f"HTTP {status}"
     if not urgent:
         return True, f"Delivered to {to}."
-    # urgent: /api/post buffered the message then halted the recipient.
-    # Report whether a turn was actually halted so the model knows if its
-    # message landed now (was_in_flight) or merely queued (idle recipient).
-    if parsed.get("was_in_flight"):
-        return True, f"Delivered to {to} + halted its in-flight turn (acting on it now)."
-    return True, f"Delivered to {to} (was idle; nothing to halt — acts on its next turn)."
+    # urgent preempt is DISABLED host-side (Agent.halt wedges the CLI MCP bridge;
+    # under review with upstream). The message IS delivered, but it does NOT
+    # interrupt — the recipient acts on it on its next turn, same as a normal send.
+    return True, (
+        f"Delivered to {to} — NOTE: urgent preempt is currently disabled "
+        f"(queued; acted on next turn, not mid-turn)."
+    )
 
 
 def schedule_defer(
