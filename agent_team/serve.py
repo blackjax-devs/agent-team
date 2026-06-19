@@ -1146,6 +1146,24 @@ async def _amain(host: str, port: int) -> int:
         profile.roster,
     )
 
+    # Big resumed tapes slow the first-turn full-history re-feed to the CLI,
+    # which can push the MCP-catalog connect past sagent's default 8s ceiling
+    # (anthropic_cli._MCP_CONNECT_TIMEOUT_SEC) and raise SubprocessTransportError
+    # on a cold turn -> respawn loop (observed 2026-06-19, swe). Raise that
+    # ceiling host-side (module constant, read at call time) so a slow cold
+    # start tolerates the load instead of erroring. Env-tunable; the real fix is
+    # smaller tapes (earlier compaction, see roles/common.py).
+    import sagent.providers.anthropic_cli as _acli
+
+    _mcp_to = float(os.environ.get("AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC", "25"))
+    if _mcp_to != _acli._MCP_CONNECT_TIMEOUT_SEC:
+        _LOG.info(
+            "MCP-connect ceiling: %.0fs (sagent default %.1fs)",
+            _mcp_to,
+            _acli._MCP_CONNECT_TIMEOUT_SEC,
+        )
+        _acli._MCP_CONNECT_TIMEOUT_SEC = _mcp_to
+
     agents = _build_all_agents(profile)
     _LOG.info("brought up %d agents: %s", len(agents), sorted(agents))
 

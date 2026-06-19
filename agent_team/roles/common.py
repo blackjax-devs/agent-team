@@ -372,7 +372,18 @@ def build_agent(
     # for the compacted result; the resulting ``ContextSplice`` rides
     # sagent's tape and is fed to claude on the next turn. sagent owns
     # compaction; claude's auto-compact is disabled by the provider.
-    compactor = SummaryCompactor()
+    #
+    # We fire EARLIER than the 0.95 default (env-tunable AGENT_TEAM_COMPACT_
+    # TRIGGER, default 0.80). A lower trigger keeps the resumed tape small, so
+    # the first-turn full-history re-feed after a restart stays fast — AND it
+    # makes agents compact while HEALTHY. A wedged subprocess CANNOT compact:
+    # observed 2026-06-19, swe's compaction failed 'subprocess stdout closed'
+    # because it had already wedged before ever reaching 0.95, so its 1.2 MB
+    # tape never shrank and every cold turn slow-started past the 8s MCP limit.
+    import os
+
+    _compact_trigger = float(os.environ.get("AGENT_TEAM_COMPACT_TRIGGER", "0.80"))
+    compactor = SummaryCompactor(utilization_trigger=_compact_trigger)
 
     # NOTE: must not collide with sagent's bridge server name (``"sagent"``,
     # hardcoded at sagent/providers/lib/mcp_bridge.py:175). The bridge
