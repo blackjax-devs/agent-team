@@ -1116,11 +1116,25 @@ async function sendMessage() {
       fetch('/api/post', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to, body, urgent }),
+        body: JSON.stringify({ to, body }),
       })
     ));
     const bad = results.find(r => !r.ok);
     if (bad) throw new Error(await bad.text());
+    // Interrupt is a SEPARATE host-side endpoint (/api/interrupt -> Agent.halt),
+    // NOT a flag on /api/post — the server ignores 'urgent'. Two-step flow: the
+    // post above buffers the message in the recipient's inbox; this then aborts
+    // their in-flight turn so they drain and act on the buffered message
+    // immediately, instead of only after the current turn finishes.
+    if (urgent) {
+      await Promise.all(recipients.map(to =>
+        fetch('/api/interrupt', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role: to }),
+        })
+      ));
+    }
     inputEl.value = '';
     autoResize();
   } catch (e) {
