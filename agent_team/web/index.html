@@ -226,6 +226,31 @@
     background: color-mix(in srgb, var(--hl-color, var(--role-default)) 14%, transparent);
     box-shadow: inset 3px 0 0 var(--hl-color, var(--role-default));
   }
+  /* Self-messages (sagent_defer / self-pings): nested, collapsed peek line;
+     click to open the full body. Stays in the feed so a burst still reads as
+     "this agent is deferring a lot" — just compact instead of full cards. */
+  .msg.self { display: block; padding: 1px 0 1px 50px; }
+  .msg.self .self-line {
+    display: flex; align-items: baseline; gap: 6px;
+    font-size: 11px; color: var(--text-mute);
+    padding-left: 8px; border-left: 2px solid var(--divider);
+    cursor: pointer;
+  }
+  .msg.self .self-line:hover { border-left-color: var(--text-dim); }
+  .msg.self .self-icon { flex: 0 0 auto; }
+  .msg.self .self-line .from { flex: 0 0 auto; font-weight: 600; }
+  .msg.self .self-count {
+    flex: 1 1 auto; min-width: 0;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    color: var(--text-dim);
+  }
+  .msg.self .self-line .ts { flex: 0 0 auto; }
+  .msg.self .self-full {
+    margin: 3px 0 3px 8px; padding: 2px 0 2px 10px;
+    border-left: 2px solid var(--divider);
+  }
+  .msg.self .self-item { padding: 3px 0; }
+  .msg.self .self-item .ts { font-size: 10px; color: var(--text-mute); }
   .msg {
     display: grid;
     grid-template-columns: auto 1fr;
@@ -797,7 +822,6 @@ function isSelfMessage(msg) {
 }
 
 function msgMatchesFilter(msg) {
-  if (isSelfMessage(msg)) return false;     // always hide self-messages
   if (filterFrom && msg.from !== filterFrom) return false;
   if (filterTo) {
     const matched = (msg.to || []).some(r => r === filterTo || r === 'all');
@@ -813,9 +837,11 @@ function applyFilterToRow(row, msg) {
 
 function updateFilterStats() {
   const rows = Array.from(messagesEl.children).filter(r => r._msg);
+  const sz = r => (r._msgs ? r._msgs.length : 1);   // self-groups hold k messages
   const total = allMessages.length;
-  const rendered = rows.length;
-  const visible = rows.filter(r => !r.classList.contains('filtered')).length;
+  const rendered = rows.reduce((n, r) => n + sz(r), 0);
+  const visible = rows.filter(r => !r.classList.contains('filtered'))
+                      .reduce((n, r) => n + sz(r), 0);
   const hidden = total - rendered;
   let parts = [];
   if (filterFrom || filterTo) parts.push(`${visible} of ${rendered} shown`);
@@ -840,7 +866,7 @@ function rebuildVisibility() {
     if (!msg) continue;
     applyFilterToRow(row, msg);
     const visible = !row.classList.contains('filtered');
-    if (visible) {
+    if (visible && !isSelfMessage(msg)) {
       const continued =
         msg.from === prevVisibleFrom && sameRecipients(msg.to, prevVisibleTo);
       row.classList.toggle('continued', continued);
@@ -868,7 +894,71 @@ function applyRoleHighlight() {
   }
 }
 
+// Self-messages (sagent_defer / self-pings) are grouped: a run of consecutive
+// defers from the SAME agent collapses into one nested marker — "defer: k
+// messages" — that expands on click (a single defer shows its body peek). The
+// count keeps the "how much is this agent deferring?" signal in one line.
+function selfItemHtml(msg) {
+  return `<div class="self-item">
+    <span class="ts">${fmtTime(msg.ts)}</span>
+    <div class="text">${renderBody(msg.body || '')}</div>
+  </div>`;
+}
+
+function refreshSelfGroup(group) {
+  const msgs = group._msgs;
+  const k = msgs.length;
+  group.querySelector('.self-count').textContent =
+    k === 1 ? (msgs[0].body || '').replace(/\s+/g, ' ').trim()
+            : `defer: ${k} messages`;
+  group.querySelector('.self-line > .ts').textContent = fmtTime(msgs[k - 1].ts);
+}
+
+function renderSelfMessage(msg) {
+  const prev = messagesEl.lastElementChild;
+  if (prev && prev.classList.contains('self-group') && prev.dataset.from === msg.from) {
+    prev._msgs.push(msg);
+    prev.querySelector('.self-full').insertAdjacentHTML('beforeend', selfItemHtml(msg));
+    refreshSelfGroup(prev);
+  } else {
+    const color = roleColor(msg.from);
+    const group = document.createElement('div');
+    group.className = 'msg self self-group';
+    group.dataset.from = msg.from;
+    group._msg = msg;               // representative for filter / highlight / visibility
+    group._msgs = [msg];
+    group.innerHTML = `
+      <div class="self-line" title="click to expand">
+        <span class="self-icon" style="color:${color}">↻</span>
+        <span class="from" style="color:${color}" data-role="${msg.from}">@${msg.from}</span>
+        <span class="self-count"></span>
+        <span class="ts"></span>
+      </div>
+      <div class="self-full" hidden>${selfItemHtml(msg)}</div>`;
+    refreshSelfGroup(group);
+    const full = group.querySelector('.self-full');
+    group.querySelector('.self-line').addEventListener('click', (e) => {
+      if (e.target.closest('[data-role]')) return;
+      full.hidden = !full.hidden;
+      group.classList.toggle('open', !full.hidden);
+    });
+    group.querySelectorAll('[data-role]').forEach(el => {
+      el.style.cursor = 'pointer';
+      el.addEventListener('click', (e) => { e.stopPropagation(); openTrace(el.dataset.role); });
+    });
+    messagesEl.appendChild(group);
+    if (messageInvolves(msg, traceRole)) group.classList.add('role-hl');
+    applyFilterToRow(group, msg);
+  }
+  lastTs = msg.ts;
+  updateFilterStats();
+  const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop
+                    - messagesEl.clientHeight < 80;
+  if (nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
 function renderMessage(msg) {
+  if (isSelfMessage(msg)) { renderSelfMessage(msg); return; }
   const continued =
     msg.from === lastFromRole && sameRecipients(msg.to, lastTo);
   const row = document.createElement('div');
@@ -897,7 +987,7 @@ function renderMessage(msg) {
 
   row.querySelectorAll('[data-role]').forEach(el => {
     el.style.cursor = 'pointer';
-    el.addEventListener('click', () => openTrace(el.dataset.role));
+    el.addEventListener('click', (e) => { e.stopPropagation(); openTrace(el.dataset.role); });
   });
 
   messagesEl.appendChild(row);
