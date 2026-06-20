@@ -98,6 +98,14 @@ _RESUME_KEEP_RECORDS = int(os.environ.get("AGENT_TEAM_RESUME_KEEP", "120"))
 _VALID_RESUME_MODES = ("full", "slim", "materialize")
 _RESUME_MODE = os.environ.get("AGENT_TEAM_RESUME_MODE", "materialize").strip().lower()
 
+# Lead/coordinator role for TL-anchored slim (`slim` mode only): the lead is
+# slimmed by record count and every other agent is slimmed to the lead's
+# wall-clock floor, so the busy coordinator doesn't end up with a SHORTER
+# recent window than its peers (same record-count = less wall-clock for the
+# lead) → the asymmetric-slim desync where peers report work the lead has
+# forgotten. Empty/absent-from-roster disables anchoring (per-agent slim).
+_RESUME_LEAD_ROLE = os.environ.get("AGENT_TEAM_RESUME_LEAD", "tl").strip()
+
 _LOG = logging.getLogger("agent_team.serve")
 
 
@@ -180,16 +188,17 @@ def _slim_resume_tape(tape, keep):
 
     Drops ``ContextSplice`` compaction barriers (they mask refs by ordinal;
     after a tail slice they'd reference dropped records) and keeps the last
-    ``keep`` ``ReferrableTapeEvent``s, snapped FORWARD to the first
-    ``UserMessage`` so the slice starts at a clean turn boundary — no dangling
-    ``tool_result`` whose ``tool_call`` was cut. ``replay_tape`` tolerates the
-    non-contiguous tail (it derives the next ordinal from ``max(ordinal)+1``).
+    ``keep`` ``ReferrableTapeEvent``s, snapped FORWARD to the first inbound
+    user-role message (``UserMessage`` or ``AgentSendMessage`` — both render as
+    user-role and are clean turn boundaries) so the slice starts cleanly — no
+    dangling ``tool_result`` whose ``tool_call`` was cut. ``replay_tape``
+    tolerates the non-contiguous tail (next ordinal = ``max(ordinal)+1``).
 
     Deterministic, no model call — this is the whole point: a fat tape can't
     wedge the MCP-catalog handshake on resume the way a live ``compact()`` can
     (and did, on TL). Returns ``(slimmed, dropped)``; ``keep<=0`` disables.
     """
-    from sagent.types.runtime import UserMessage
+    from sagent.types.runtime import AgentSendMessage, UserMessage
     from sagent.types.tape import ContextSplice
 
     # Small tape (or disabled): leave it completely untouched — no risk worth
@@ -199,10 +208,104 @@ def _slim_resume_tape(tape, keep):
     events = [r for r in tape if not isinstance(r, ContextSplice)]
     tail = events[-keep:] if len(events) > keep else events
     for i, r in enumerate(tail):
-        if isinstance(getattr(r, "event", None), UserMessage):
+        if isinstance(getattr(r, "event", None), (UserMessage, AgentSendMessage)):
             tail = tail[i:]
             break
     return tail, len(tape) - len(tail)
+
+
+def _inbound_floor_ts(records):
+    """Earliest wall-clock timestamp among inbound (user-role) messages.
+
+    Inbound ``UserMessage`` / ``AgentSendMessage`` tape events each carry a
+    ``.timestamp`` (epoch float) — these are the cross-agent sync points. The
+    min over a slimmed lead tape is the lead's recent-window floor: the anchor
+    every other agent is trimmed to. Returns ``None`` when there is no
+    timestamped inbound message (caller falls back to per-agent slim).
+    """
+    from sagent.types.runtime import AgentSendMessage, UserMessage
+
+    floors = []
+    for r in records:
+        ev = getattr(r, "event", None)
+        if isinstance(ev, (UserMessage, AgentSendMessage)):
+            t = getattr(ev, "timestamp", None)
+            if isinstance(t, (int, float)) and t > 0:
+                floors.append(t)
+    return min(floors) if floors else None
+
+
+def _slim_tape_to_floor(tape, floor_ts):
+    """Keep tape records from the first inbound message at/after ``floor_ts``.
+
+    Drops ``ContextSplice`` barriers and everything older than the shared floor,
+    starting the slice at a clean user-role turn boundary. When the agent has
+    been **idle since before the floor** (no inbound at/after it), keep ONLY its
+    most recent inbound turn — a breadcrumb, not the full stale window that
+    drives the churn (an idle agent resuming an abandoned task). Returns
+    ``None`` only when there is no inbound message at all (degenerate; the
+    caller keeps the per-agent record slim).
+    """
+    from sagent.types.runtime import AgentSendMessage, UserMessage
+    from sagent.types.tape import ContextSplice
+
+    events = [r for r in tape if not isinstance(r, ContextSplice)]
+    inbound = [
+        i
+        for i, r in enumerate(events)
+        if isinstance(getattr(r, "event", None), (UserMessage, AgentSendMessage))
+    ]
+    if not inbound:
+        return None
+    for i in inbound:
+        t = getattr(events[i].event, "timestamp", None)
+        if isinstance(t, (int, float)) and t >= floor_ts:
+            return events[i:]
+    # idle since before the floor → keep just the most recent turn.
+    return events[inbound[-1] :]
+
+
+def _plan_slim_resume(loaded):
+    """Compute each agent's slimmed tape for a resume.
+
+    ``loaded`` maps ``label -> (meta, tape, tool_state)``. Returns
+    ``label -> (slimmed_tape, note)``.
+
+    - ``full`` / ``materialize``: resume the whole tape (materialize writes the
+      session file directly, so there's no re-feed to bound).
+    - ``slim``: **TL-anchored**. Slim the lead by record count to fix its recent
+      window, take that window's wall-clock floor, and slim every other agent to
+      that same floor — one shared temporal horizon, so no agent retains work
+      the lead has forgotten (the desync). Agents idle since before the floor,
+      or any case with no derivable anchor, fall back to a per-agent record slim
+      (never a regression vs the pre-anchor behaviour).
+    """
+    if _RESUME_MODE != "slim":
+        return {label: (tape, "") for label, (_m, tape, _t) in loaded.items()}
+
+    keep = _RESUME_KEEP_RECORDS
+    plan: dict = {}
+    floor = None
+    lead = _RESUME_LEAD_ROLE
+    if lead and lead in loaded:
+        lead_slim, _ = _slim_resume_tape(loaded[lead][1], keep)
+        floor = _inbound_floor_ts(lead_slim)
+        plan[lead] = (
+            lead_slim,
+            f" lead-anchor floor={floor:.0f}" if floor else " lead (no anchor)",
+        )
+
+    for label, (_m, tape, _t) in loaded.items():
+        if label in plan:
+            continue
+        if floor is not None:
+            anchored = _slim_tape_to_floor(tape, floor)
+            if anchored is not None:
+                plan[label] = (anchored, " anchored-to-lead")
+                continue
+        slimmed, _ = _slim_resume_tape(tape, keep)
+        plan[label] = (slimmed, " per-agent")
+    return plan
 
 
 def _probe_claude_version() -> str:
@@ -335,53 +438,67 @@ def _resume_agents_from_session_dir(
     feeds only deltas. No claude-session-file parsing -- sagent's own tape is
     the single source of truth.
 
-    Mode (``AGENT_TEAM_RESUME_MODE``): ``slim`` trims the tape to its recent
-    tail (``_RESUME_KEEP_RECORDS``) so the first-turn re-feed stays small — the
-    deterministic answer to the fat-tape boot wedge. ``full`` resumes the
-    untrimmed tape. ``materialize`` resumes the untrimmed tape AND (when the
+    Mode (``AGENT_TEAM_RESUME_MODE``): ``slim`` trims each tape to its recent
+    tail so the first-turn re-feed stays small — the deterministic answer to the
+    fat-tape boot wedge — and **anchors the trim across agents on the lead**
+    (``_plan_slim_resume``) so a restart can't desync the team. ``full`` resumes
+    the untrimmed tape. ``materialize`` resumes the untrimmed tape AND (when the
     boot drift-canary passed, ``materialize_enabled``) writes claude's session
     file from the resolved context + flips the provider so turn-1 is a clean
     native ``--resume`` (no re-feed at all). The on-disk sagent JSONL is
     untouched in every mode.
 
-    Best-effort and never crashes boot: a per-agent failure logs a
-    warning and that agent starts fresh.
+    Three phases so ``slim`` can anchor across agents: load every tape, plan the
+    (cross-agent) slim, then resume + materialize. Best-effort and never crashes
+    boot: a per-agent failure logs a warning and that agent starts fresh.
     """
     from sagent.agent.session_io import load_session
 
+    # Phase 1 — load every agent's persisted tape.
+    loaded: dict = {}  # label -> (meta, tape, tool_state)
     for label, agent in agents.items():
-        session_dir = agent.session_dir
-        if session_dir is None:
+        if agent.session_dir is None:
             continue
         try:
-            loaded = load_session(session_dir, {})
-            if loaded is None:
-                _LOG.info("resume %s: no prior session.jsonl — fresh start", label)
-                continue
-            meta, tape, tool_state = loaded
-            full = len(tape)
-            # Only `slim` trims; `full` and `materialize` resume the whole tape
-            # (materialize writes the file directly, so no re-feed to bound).
-            keep = _RESUME_KEEP_RECORDS if _RESUME_MODE == "slim" else 0
-            slimmed, dropped = _slim_resume_tape(tape, keep)
+            res = load_session(agent.session_dir, {})
+        except Exception as exc:
+            _LOG.warning(
+                "resume %s: load failed (%s: %s); agent starts fresh",
+                label,
+                type(exc).__name__,
+                exc,
+            )
+            continue
+        if res is None:
+            _LOG.info("resume %s: no prior session.jsonl — fresh start", label)
+            continue
+        loaded[label] = res
+
+    # Phase 2 — plan the slim (TL-anchored in `slim`; whole tape otherwise).
+    plan = _plan_slim_resume(loaded)
+
+    # Phase 3 — resume each agent, then (materialize) write its session file.
+    for label, (meta, tape, tool_state) in loaded.items():
+        agent = agents[label]
+        try:
+            slimmed, note = plan[label]
             agent.resume(meta, slimmed, tool_state)
-            if dropped:
+            if len(slimmed) != len(tape):
                 _LOG.info(
-                    "resume %s [%s]: rehydrated %d tape records, slimmed to %d "
-                    "(dropped %d older; AGENT_TEAM_RESUME_KEEP=%d)",
+                    "resume %s [%s]: %d -> %d tape records%s",
                     label,
                     _RESUME_MODE,
-                    full,
+                    len(tape),
                     len(slimmed),
-                    dropped,
-                    _RESUME_KEEP_RECORDS,
+                    note,
                 )
             else:
                 _LOG.info(
-                    "resume %s [%s]: rehydrated %d tape records",
+                    "resume %s [%s]: %d tape records%s",
                     label,
                     _RESUME_MODE,
-                    full,
+                    len(tape),
+                    note,
                 )
             # materialize mode: write the CLI session file from the resolved
             # context + flip the seam so turn-1 is a clean native --resume.
@@ -389,7 +506,7 @@ def _resume_agents_from_session_dir(
                 _materialize_on_resume(label, agent)
         except Exception as exc:
             _LOG.warning(
-                "resume %s: failed (%s: %s); agent starts fresh",
+                "resume %s: resume failed (%s: %s); agent starts fresh",
                 label,
                 type(exc).__name__,
                 exc,
