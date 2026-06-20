@@ -867,9 +867,45 @@ def _build_http_app(agents):
                 before = len(agent.runtime.context().messages)
             except Exception:
                 before = None
+            # Guards: live ``compact()`` runs a model call that re-feeds the
+            # resolved context. On a large context that re-feed blows the
+            # MCP-catalog deadline and crashes the compaction subprocess (the
+            # TL fat-tape wedge). And on a still-settling agent (model call in
+            # flight after a restart) the same re-feed is unstable. Refuse and
+            # point at the safe paths rather than crash the agent.
+            slim_max = int(os.environ.get("AGENT_TEAM_SLIM_MAX_MESSAGES", "250"))
+            if before is not None and before > slim_max:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "role": role,
+                        "mode": mode,
+                        "output": (
+                            f"refused: context is {before} messages (> {slim_max}). A "
+                            f"live compact would re-feed the whole tape and risk a "
+                            f"catalog-timeout crash → wedge. Use a server restart "
+                            f"(resume-slim trims to the last "
+                            f"AGENT_TEAM_RESUME_KEEP={_RESUME_KEEP_RECORDS}) or "
+                            f"mode=reanchor. Override via AGENT_TEAM_SLIM_MAX_MESSAGES."
+                        ),
+                    }
+                )
+            if getattr(agent.runtime, "model_call", None) is not None:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "role": role,
+                        "mode": mode,
+                        "output": (
+                            "refused: agent is mid-turn / still settling (model call in "
+                            "flight). Let it reach idle before slimming, or use "
+                            "mode=reanchor to preempt + reset."
+                        ),
+                    }
+                )
             try:
                 # ``compact()`` resolves on CompactComplete OR CompactFailed;
-                # the timeout guards a wedged compaction subprocess. A 1.97 MB
+                # the timeout guards a wedged compaction subprocess. A large
                 # tape's summary call can take a while, hence the generous cap.
                 await asyncio.wait_for(agent.compact(), timeout=180.0)
                 after = (

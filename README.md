@@ -90,12 +90,16 @@ intensities per agent (also `POST /api/restart {role, mode}`, loopback-only):
 | `soft` | clears history, preserves the inbox | a blunt reset |
 | `reanchor` | clears history, then re-seeds the last couple of turns + a "re-sync with the lead before acting" directive | recovering a stuck/confused agent |
 
-> `slim` runs a model call to summarize, so use it on a **warm, settled** agent;
-> for a very large or unresponsive tape prefer a server restart (resume-slim)
-> or `reanchor`.
+> `slim` runs a model call to summarize, so it only fits a **warm, settled**
+> agent. The server **refuses** a live `slim` when the context is large
+> (> `AGENT_TEAM_SLIM_MAX_MESSAGES`) or a turn is in flight — re-feeding a big
+> tape inside the compact call is exactly what wedges an agent. For a very
+> large or unresponsive tape, prefer a server restart (resume-slim) or
+> `reanchor`.
 
 Related env knobs:
 - `AGENT_TEAM_RESUME_KEEP` (default `120`) — messages kept per tape on resume; `0` resumes the full tape.
+- `AGENT_TEAM_SLIM_MAX_MESSAGES` (default `250`) — max resolved-context size at which a live `slim` is allowed; above it the server refuses and points at a restart.
 - `AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC` (default `25`) — seconds boot waits for the CLI's MCP bridge before respawning.
 - `AGENT_TEAM_COMPACT_TRIGGER` (default `0.80`) — context-utilization fraction at which an agent auto-compacts mid-run.
 
