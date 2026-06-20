@@ -66,6 +66,16 @@ _MAIN_JSONL = delivery.MAIN_JSONL_PATH
 # window. Path must match :data:`mcp_sagent.server._SUPPRESS_FLAG`.
 _SUPPRESS_FLAG = delivery.SESSIONS_DIR / "_suppress_audit"
 
+# Resume-slim: on every server restart, trim each agent's resumed tape to
+# ~the last N history events (snapped to a turn boundary) BEFORE handing it to
+# the provider. Deterministic (no model call), so a large tape can't blow the
+# MCP-catalog deadline on the first-turn re-feed — the fat-tape boot wedge that
+# took down TL (855 records / 1.97 MB) after a failed live compact. ON by
+# default; set to 0 to disable (resume the full tape), or raise to keep more
+# recent context. The on-disk JSONL is untouched — only the in-memory re-feed
+# is bounded, and every restart re-slims from the full physical history.
+_RESUME_KEEP_RECORDS = int(os.environ.get("AGENT_TEAM_RESUME_KEEP", "120"))
+
 _LOG = logging.getLogger("agent_team.serve")
 
 
@@ -143,6 +153,36 @@ async def _serve_agents_forever(agents):
     return tasks
 
 
+def _slim_resume_tape(tape, keep):
+    """Trim a resumed tape to ~the last ``keep`` history events.
+
+    Drops ``ContextSplice`` compaction barriers (they mask refs by ordinal;
+    after a tail slice they'd reference dropped records) and keeps the last
+    ``keep`` ``ReferrableTapeEvent``s, snapped FORWARD to the first
+    ``UserMessage`` so the slice starts at a clean turn boundary — no dangling
+    ``tool_result`` whose ``tool_call`` was cut. ``replay_tape`` tolerates the
+    non-contiguous tail (it derives the next ordinal from ``max(ordinal)+1``).
+
+    Deterministic, no model call — this is the whole point: a fat tape can't
+    wedge the MCP-catalog handshake on resume the way a live ``compact()`` can
+    (and did, on TL). Returns ``(slimmed, dropped)``; ``keep<=0`` disables.
+    """
+    from sagent.types.runtime import UserMessage
+    from sagent.types.tape import ContextSplice
+
+    # Small tape (or disabled): leave it completely untouched — no risk worth
+    # taking, and the re-feed is already cheap.
+    if keep <= 0 or len(tape) <= keep:
+        return tape, 0
+    events = [r for r in tape if not isinstance(r, ContextSplice)]
+    tail = events[-keep:] if len(events) > keep else events
+    for i, r in enumerate(tail):
+        if isinstance(getattr(r, "event", None), UserMessage):
+            tail = tail[i:]
+            break
+    return tail, len(tape) - len(tail)
+
+
 def _resume_agents_from_session_dir(agents) -> None:
     """Rehydrate each agent's tape from its sagent ``session.jsonl``.
 
@@ -151,10 +191,16 @@ def _resume_agents_from_session_dir(agents) -> None:
     ``serve.py`` run persisted its tape to ``<session_dir>/session.jsonl``.
     On boot we ``load_session`` + ``Agent.resume`` each one. The resumed
     tape then drives the provider: on the agent's first turn after resume,
-    the AnthropicCLI model re-feeds that full history to ``claude
-    --session-id``, which rebuilds the on-disk CLI session; every later
-    turn ``--resume``s and feeds only deltas. No claude-session-file
-    parsing -- sagent's own tape is the single source of truth.
+    the AnthropicCLI model re-feeds that history to ``claude --session-id``,
+    which rebuilds the on-disk CLI session; every later turn ``--resume``s and
+    feeds only deltas. No claude-session-file parsing -- sagent's own tape is
+    the single source of truth.
+
+    Resume-slim (``_RESUME_KEEP_RECORDS``, default on): the resumed tape is
+    trimmed to its recent tail before ``resume`` so the first-turn re-feed
+    stays small — this is the server-level, deterministic answer to the
+    fat-tape boot wedge (a full re-feed of a 1.97 MB tape blows the 25 s
+    MCP-catalog deadline). The on-disk JSONL is untouched.
 
     Best-effort and never crashes boot: a per-agent failure logs a
     warning and that agent starts fresh.
@@ -171,8 +217,21 @@ def _resume_agents_from_session_dir(agents) -> None:
                 _LOG.info("resume %s: no prior session.jsonl — fresh start", label)
                 continue
             meta, tape, tool_state = loaded
-            agent.resume(meta, tape, tool_state)
-            _LOG.info("resume %s: rehydrated %d tape records", label, len(tape))
+            full = len(tape)
+            slimmed, dropped = _slim_resume_tape(tape, _RESUME_KEEP_RECORDS)
+            agent.resume(meta, slimmed, tool_state)
+            if dropped:
+                _LOG.info(
+                    "resume %s: rehydrated %d tape records, slimmed to %d "
+                    "(dropped %d older; AGENT_TEAM_RESUME_KEEP=%d)",
+                    label,
+                    full,
+                    len(slimmed),
+                    dropped,
+                    _RESUME_KEEP_RECORDS,
+                )
+            else:
+                _LOG.info("resume %s: rehydrated %d tape records", label, full)
         except Exception as exc:
             _LOG.warning(
                 "resume %s: failed (%s: %s); agent starts fresh",
