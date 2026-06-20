@@ -26,6 +26,17 @@ dependencies = [
 agent-team = "agent_team.serve:main"
 agent-team-merge = "agent_team.merge_jsonl:main"
 
+[dependency-groups]
+# Test deps for the vendored cli_session/ materializer suite (async canary
+# tests need pytest-asyncio). Run: `uv run --group dev pytest agent_team/`.
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
@@ -43,4 +54,5 @@ agent_team = [
     "web/*.html",
     "profiles/**/*.toml",
     "profiles/**/*.md",
+    "cli_session/*.md",
 ]
