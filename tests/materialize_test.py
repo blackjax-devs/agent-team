@@ -20,12 +20,24 @@ import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from sagent.providers.anthropic_cli import _AnthropicCLIModel
 from sagent.providers.lib.cost import ModelProfile, Pricing
 from sagent.types.runtime import AssistantMessage, UserMessage
 
 from agent_team.cli_session.materializer import session_jsonl_path
 from agent_team.serve import _materialize_on_resume
+
+
+@pytest.fixture(autouse=True)
+def _stub_probes(monkeypatch):
+    """The wiring tests exercise _materialize_on_resume's logic, not the live
+    CLI — stub the `claude --version` / git probes so they run headless (CI has
+    no `claude` binary). Harmless for the seam test, which never probes."""
+    monkeypatch.setattr("agent_team.serve._probe_claude_version", lambda: "2.1.183")
+    monkeypatch.setattr("agent_team.serve._probe_git_branch", lambda cwd: "HEAD")
+
 
 # Exact private surface serve._materialize_on_resume depends on.
 _REQUIRED_SEAMS = (
