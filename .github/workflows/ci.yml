@@ -46,8 +46,10 @@ jobs:
         run: uv sync
 
       # pytest is not a project dependency, so bring it in just for the run.
+      # pytest-asyncio: the vendored cli_session tripwire suite has async tests
+      # (asyncio_mode=auto in pyproject); without it they run as silent no-ops.
       - name: Run test suite
-        run: uvx --with-editable . --with pytest pytest -q
+        run: uvx --with-editable . --with pytest --with pytest-asyncio pytest -q
 
       # Framework import smoke: package import + bundled-default profile load
       # (no AGENT_TEAM_PROFILE_DIR — exercises the in-package default that
