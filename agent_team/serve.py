@@ -84,17 +84,19 @@ _RESUME_KEEP_RECORDS = int(os.environ.get("AGENT_TEAM_RESUME_KEEP", "120"))
 #                 resolved history via `claude --session-id` (the original
 #                 fat-tape boot-wedge risk). Escape hatch.
 #   slim        — trim the tape to its recent tail (`_RESUME_KEEP_RECORDS`)
-#                 then resume; first turn re-feeds the trimmed tail. Today's
-#                 default; deterministic, no model call.
+#                 then resume; first turn re-feeds the trimmed tail.
+#                 Deterministic, no model call. Also the materialize fallback.
 #   materialize — write claude's session JSONL directly from the resumed
 #                 context (vendored cli_session materializer) and flip the
 #                 provider so turn-1 is a clean native `--resume` of that file
-#                 — NO re-feed, exact mid-thread continuation. Gated by a boot
-#                 drift-canary; falls back to slim if the canary finds the
-#                 claude session format has drifted. The eventual default,
-#                 opt-in until proven on a couple of CLI versions.
+#                 — NO re-feed, exact mid-thread continuation, effectively
+#                 instant startup. Gated by a boot drift-canary; falls back to
+#                 slim if the canary finds the claude session format has drifted
+#                 (or if `claude` is unavailable at boot). THE DEFAULT — proven
+#                 live (TL's 1.98 MB tape resumed clean, all agents warmed up
+#                 READY, 0 errors); set AGENT_TEAM_RESUME_MODE=slim to opt out.
 _VALID_RESUME_MODES = ("full", "slim", "materialize")
-_RESUME_MODE = os.environ.get("AGENT_TEAM_RESUME_MODE", "slim").strip().lower()
+_RESUME_MODE = os.environ.get("AGENT_TEAM_RESUME_MODE", "materialize").strip().lower()
 
 _LOG = logging.getLogger("agent_team.serve")
 
