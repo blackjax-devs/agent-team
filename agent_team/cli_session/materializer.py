@@ -73,6 +73,14 @@ def session_jsonl_path(session_id: str, *, cwd: Path, home: Path | None = None) 
 
     """
     home = home or Path(os.environ.get("HOME", "~")).expanduser()
+    # Canonicalize cwd (symlinks resolved) to match the provider's
+    # ``_session_jsonl_path`` (anthropic_cli.py:1567) byte-for-byte — else a
+    # symlinked spawn cwd makes the materializer write a different file than
+    # the provider ``--resume``s. OSError-guarded exactly like the provider.
+    try:
+        cwd = cwd.resolve()
+    except OSError:
+        pass
     encoded = re.sub(r"[^A-Za-z0-9-]", "-", str(cwd))
     return home / ".claude" / "projects" / encoded / f"{session_id}.jsonl"
 
