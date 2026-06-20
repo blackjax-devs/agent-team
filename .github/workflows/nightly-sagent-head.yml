@@ -56,7 +56,7 @@ jobs:
         run: uv run python -c "import sagent, importlib.metadata as m; print('sagent', m.version('sagent'), '->', sagent.__file__)"
 
       - name: Run test suite against sagent HEAD
-        run: uvx --with-editable . --with pytest pytest -q
+        run: uvx --with-editable . --with pytest --with pytest-asyncio pytest -q
 
       # The load-bearing check: assert sagent main's AnthropicCLI.model() still
       # accepts the kwargs roles/common.py passes. This is what catches a model()
@@ -66,3 +66,13 @@ jobs:
       - name: Provider signature smoke against sagent HEAD
         run: |
           uv run python -c "import inspect; from sagent.providers import AnthropicCLI; have=set(inspect.signature(AnthropicCLI.model).parameters); need={'extra_mcp_servers','session_id','subprocess_read_timeout_sec'}; miss=need-have; assert not miss, f'sagent main AnthropicCLI.model() is missing: {sorted(miss)} — agent-team cannot migrate yet'; print('provider model() signature OK on main:', sorted(need))"
+
+      # The `materialize` resume mode reaches into private _AnthropicCLIModel
+      # internals (the session_id kwarg → _session_id, plus _session_initialized
+      # / _last_sent_index / _claude_home / _session_jsonl_path) to flip turn-1
+      # to a native `--resume`. If main renames/removes any of those seams, our
+      # materialize wiring silently breaks — this guards them the same way the
+      # model()-signature smoke guards model()'s kwargs. A red run = main dropped
+      # a seam; do not bump the pin / ship materialize against it.
+      - name: Materialize provider-seams smoke against sagent HEAD
+        run: uvx --with-editable . --with pytest --with pytest-asyncio pytest tests/materialize_test.py::test_provider_seams_present -q

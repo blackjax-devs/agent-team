@@ -81,6 +81,18 @@ untouched. Set `AGENT_TEAM_RESUME_KEEP=0` to disable (resume the full tape), or
 raise it to keep more context. **A server restart is therefore the reliable
 recovery for an agent whose tape has grown too large to re-feed.**
 
+**Resume mode (`AGENT_TEAM_RESUME_MODE`).** The above is the `slim` mode (the
+default). Two others:
+- **`materialize`** — instead of re-feeding the tape, write claude's session
+  JSONL *directly* from the resumed context and resume it with a native
+  `--resume`. There is no re-feed at all, so startup is effectively instant and
+  each agent continues exactly mid-thread. It couples to claude's session-file
+  format, so it is gated by a boot **drift-canary** (a throwaway `claude`
+  round-trip diffed against the materializer's output); on drift it falls back
+  to `slim`. Opt-in while it bakes — the eventual default.
+- **`full`** — resume the untrimmed tape (no slimming): the original fat-tape
+  re-feed behaviour, kept as an escape hatch.
+
 **Per-agent restart (debug console).** The console at `/debug` exposes three
 intensities per agent (also `POST /api/restart {role, mode}`, loopback-only):
 
@@ -98,7 +110,8 @@ intensities per agent (also `POST /api/restart {role, mode}`, loopback-only):
 > `reanchor`.
 
 Related env knobs:
-- `AGENT_TEAM_RESUME_KEEP` (default `120`) — messages kept per tape on resume; `0` resumes the full tape.
+- `AGENT_TEAM_RESUME_MODE` (default `slim`) — `full` | `slim` | `materialize` (native `--resume`, canary-gated; effectively-instant startup).
+- `AGENT_TEAM_RESUME_KEEP` (default `120`) — messages kept per tape on resume (slim mode); `0` resumes the full tape.
 - `AGENT_TEAM_SLIM_MAX_MESSAGES` (default `250`) — max resolved-context size at which a live `slim` is allowed; above it the server refuses and points at a restart.
 - `AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC` (default `25`) — seconds boot waits for the CLI's MCP bridge before respawning.
 - `AGENT_TEAM_COMPACT_TRIGGER` (default `0.80`) — context-utilization fraction at which an agent auto-compacts mid-run.
