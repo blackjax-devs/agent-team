@@ -499,8 +499,9 @@ async function loadAgents() {
         `<details class="recent-d"><summary>recent trace (${(a.recent || []).length})</summary>` +
         `<div class="recent">${recent}</div></details>` +
         `<div class="agent-actions">` +
-          `<button class="restart" data-role="${esc(a.role)}" data-skip="0" type="button">restart</button>` +
-          `<button class="restart" data-role="${esc(a.role)}" data-skip="1" type="button">restart + skip&#8209;backlog</button>` +
+          `<button class="restart" data-role="${esc(a.role)}" data-mode="slim" type="button">slim (compact)</button>` +
+          `<button class="restart" data-role="${esc(a.role)}" data-mode="soft" type="button">restart</button>` +
+          `<button class="restart" data-role="${esc(a.role)}" data-mode="reanchor" type="button">restart + clear&#8209;tape</button>` +
         `</div>`;
       host.appendChild(card);
     });
@@ -511,20 +512,22 @@ async function loadAgents() {
 }
 $('agents-refresh').addEventListener('click', loadAgents);
 
-async function doRestart(role, skip) {
-  const blurb = skip
-    ? 'Restart @' + role + ' (soft) AND drain its inbox.\n\nIn sagent\'s single-process model, "restart" means clearing the agent\'s history + forcing a fresh claude --print subprocess on the next turn. Skip-backlog additionally drops queued inbox items.'
-    : 'Restart @' + role + ' (soft).\n\nIn sagent\'s single-process model this clears the agent\'s history and forces a fresh claude --print subprocess on the next turn. The inbox is preserved.';
-  if (!confirm(blurb)) return;
+async function doRestart(role, mode) {
+  const blurbs = {
+    slim: 'SLIM @' + role + ' (compact).\n\nSummarizes older turns into a summary and keeps the recent working thread — shrinks the tape WITHOUT wiping context or interrupting the task. Best for a long-but-healthy agent (e.g. TL) whose tape is growing. Runs a model call; fails safe (tape untouched on failure).',
+    soft: 'Restart @' + role + ' (soft).\n\nIn sagent\'s single-process model this clears the agent\'s history and forces a fresh claude --print subprocess on the next turn. The inbox is preserved.',
+    reanchor: 'Restart @' + role + ' + CLEAR TAPE (re-anchor).\n\nClears the agent\'s history (durable barrier → tiny re-feed, avoids the catalog-timeout wedge), drops its backlog, and re-seeds it with the last couple of turns + a "re-sync before acting" directive: TL reads the worklog/PR history and checks with the operator; everyone else asks TL for instruction.',
+  };
+  if (!confirm(blurbs[mode] || blurbs.soft)) return;
   const out = $('restart-out');
   out.hidden = false;
-  out.textContent = `restarting @${role}${skip ? ' (skip-backlog)' : ''}…`;
+  out.textContent = `${mode === 'slim' ? 'slimming' : 'restarting'} @${role} (${mode})…`;
   document.querySelectorAll('.restart').forEach(b => b.disabled = true);
   try {
     const r = await fetch('/api/restart', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ role, skip_backlog: skip }),
+      body: JSON.stringify({ role, mode }),
     });
     const d = await r.json();
     out.textContent =
@@ -539,7 +542,7 @@ async function doRestart(role, skip) {
 }
 $('agents').addEventListener('click', (e) => {
   const btn = e.target.closest('.restart');
-  if (btn) doRestart(btn.dataset.role, btn.dataset.skip === '1');
+  if (btn) doRestart(btn.dataset.role, btn.dataset.mode);
 });
 
 // ---- theme ----

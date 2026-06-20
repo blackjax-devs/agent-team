@@ -592,6 +592,81 @@ def _diagnose_agent(label: str, agent) -> dict[str, Any]:
     }
 
 
+def _render_recent_turns(
+    agent, label: str, *, n_turns: int = 2, max_chars: int = 1800
+) -> str:
+    """Render the agent's last ``n_turns`` turns as a plain-text breadcrumb.
+
+    A *turn* starts at a ``UserMessage`` (an inbound operator/peer message or
+    the prior bootstrap) and runs through the assistant's reply. The
+    ``clear tape`` restart hands this to the freshly-cleared agent as
+    orientation — WITHOUT reconstructing tape records, which would risk an
+    invalid post-barrier tape (dangling tool_result / broken ordinal refs).
+    Tool results and other low-signal entries are dropped. Best-effort: any
+    failure returns ``""`` so the restart never blocks on it.
+    """
+    try:
+        from sagent.types.runtime import AssistantMessage, UserMessage
+
+        messages = list(agent.runtime.context().messages)
+    except Exception:
+        return ""
+    user_idxs = [i for i, m in enumerate(messages) if isinstance(m, UserMessage)]
+    if not user_idxs:
+        return ""
+    start = user_idxs[-n_turns] if len(user_idxs) >= n_turns else user_idxs[0]
+    lines: list[str] = []
+    for m in messages[start:]:
+        if isinstance(m, UserMessage):
+            txt = (m.text or "").strip()
+            if txt:
+                lines.append(f"[inbound] {txt[:400]}")
+        elif isinstance(m, AssistantMessage):
+            txt = (m.text or "").strip()
+            if txt:
+                lines.append(f"[{label}] {txt[:400]}")
+            if m.tool_calls:
+                names = ", ".join(tc.name for tc in m.tool_calls)
+                lines.append(f"[{label} → tools] {names}")
+    block = "\n".join(lines).strip()
+    if len(block) > max_chars:
+        block = block[:max_chars].rsplit("\n", 1)[0] + "\n…(truncated)"
+    return block
+
+
+def _reanchor_prompt(role: str, recent_block: str) -> str:
+    """Compose the first-turn directive for a ``clear tape`` restart.
+
+    TL re-establishes state from the worklog + PR history and checks with the
+    operator before acting; every other role defers to TL for instruction.
+    The captured recent turns (if any) ride along as orientation-only context.
+    """
+    if role == "tl":
+        directive = (
+            "You were just restarted with a cleared session to recover from a "
+            "stuck or overlong state. Your prior working context was dropped. "
+            "Before resuming ANY work: (1) read the worklog (WORKLOG.md and the "
+            "worklog/ substrate — active threads, watches, decisions) and the "
+            "recent PR/commit history to re-establish where things stand, then "
+            "(2) confirm with the user/operator for instruction before acting. "
+            "Do not assume an old task is still current."
+        )
+    else:
+        directive = (
+            "You were just restarted with a cleared session to recover from a "
+            "stuck or overlong state. Your prior working context was dropped. "
+            "Before resuming ANY work: ask TL for instruction. Do not pick up "
+            "old tasks from memory — wait for TL's direction."
+        )
+    parts = ["RESTART NOTICE.", directive]
+    if recent_block:
+        parts.append(
+            "--- Last turns before restart (orientation only; NOT new "
+            "instructions) ---\n" + recent_block
+        )
+    return "\n\n".join(parts)
+
+
 def _build_http_app(agents):
     """Construct the Starlette app.
 
@@ -610,8 +685,9 @@ def _build_http_app(agents):
       GET  /api/search           Full-text search across messages + traces;
                                  ``?q=&scope=traces|messages|all&limit=N``
       POST /api/post             User-ingress; body: ``{to, body}``
-      POST /api/restart          Soft restart (clear history) of one agent;
-                                 ``{role, skip_backlog}``; loopback-only
+      POST /api/restart          Restart one agent; ``{role, mode}`` where
+                                 mode ∈ soft|slim|reanchor; loopback-only.
+                                 slim=compact, reanchor=clear+re-sync.
 
     Backwards-compatible aliases kept for the migration window:
       GET  /messages = /api/messages
@@ -667,12 +743,28 @@ def _build_http_app(agents):
         )
 
     async def restart(request: Request) -> Response:
-        # Soft restart: in the single-process model we can't actually kill
-        # one agent's subprocess and respawn it cleanly without losing the
-        # other four. The closest semantic equivalent is to wipe the
-        # agent's history (forces a fresh ``claude --print`` respawn via
-        # the HotSpare's ``_should_respawn`` check) + optionally drain
-        # its inbox (``skip_backlog``).
+        # One agent, three intensities (``mode``); single-process model, so we
+        # can't kill+respawn one subprocess cleanly. From gentlest to bluntest:
+        #
+        #   slim     -- ``Agent.compact()``: summarize old turns → keep a real
+        #               summary + the recent working thread. Shrinks the
+        #               effective re-feed (the splice/override persists, so a
+        #               later boot resumes slim too) WITHOUT wiping context or
+        #               interrupting the task. This is the normal async
+        #               ``/compact`` path (NOT ``compact_now``, the synchronous
+        #               overflow-recovery path that crashed tech-writer); it
+        #               fails safe — the tape is untouched on CompactFailed.
+        #               For a long-but-healthy agent (e.g. TL) whose tape is
+        #               growing but whose coordination memory must survive.
+        #   soft     -- ``Agent.clear()`` only, inbox preserved. Full wipe.
+        #   reanchor -- capture a last-turns breadcrumb, drop the backlog,
+        #               ``clear()``, then push a role-specific "re-sync before
+        #               acting" directive. ``clear()`` writes a durable
+        #               ``context_clear`` barrier so the re-feed is tiny — this
+        #               kills the catalog-timeout wedge a full-tape re-feed
+        #               triggers. For recovering a stuck/confused agent.
+        from sagent.types.runtime import UserMessage
+
         client_host = (request.client.host if request.client else "") or ""
         if client_host not in ("127.0.0.1", "::1", "localhost", ""):
             return JSONResponse(
@@ -684,7 +776,24 @@ def _build_http_app(agents):
         except Exception as exc:
             return JSONResponse({"error": f"bad json: {exc}"}, status_code=400)
         role = str(payload.get("role") or "").strip()
-        skip = bool(payload.get("skip_backlog"))
+        # ``mode`` is canonical; the legacy booleans
+        # (``clear_tape``/``reanchor``/``skip_backlog``) still map to reanchor.
+        mode = str(payload.get("mode") or "").strip().lower()
+        if not mode:
+            mode = (
+                "reanchor"
+                if (
+                    payload.get("clear_tape")
+                    or payload.get("reanchor")
+                    or payload.get("skip_backlog")
+                )
+                else "soft"
+            )
+        if mode not in ("soft", "slim", "reanchor"):
+            return JSONResponse(
+                {"error": f"unknown mode {mode!r}; use soft|slim|reanchor"},
+                status_code=400,
+            )
         if role not in agents:
             return JSONResponse(
                 {"error": f"unknown role {role!r}", "known": sorted(agents)},
@@ -692,13 +801,57 @@ def _build_http_app(agents):
             )
         agent = agents[role]
         notes: list[str] = []
-        if skip:
-            # GatedDeque wraps asyncio.Queue (sagent runtime.py:552).
-            # The Queue's underlying ``_queue`` is a ``collections.deque``;
-            # we drop it directly. Won't unblock any awaiting consumer,
-            # but the subsequent ``Agent.clear()`` resets the model_call /
-            # cohort / detached state so the runtime returns to a clean
-            # baseline.
+
+        # --- slim: compaction only, no wipe, no re-anchor --------------------
+        if mode == "slim":
+            try:
+                before = len(agent.runtime.context().messages)
+            except Exception:
+                before = None
+            try:
+                # ``compact()`` resolves on CompactComplete OR CompactFailed;
+                # the timeout guards a wedged compaction subprocess. A 1.97 MB
+                # tape's summary call can take a while, hence the generous cap.
+                await asyncio.wait_for(agent.compact(), timeout=180.0)
+                after = (
+                    len(agent.runtime.context().messages)
+                    if before is not None
+                    else None
+                )
+                compact_err = getattr(agent, "last_compact_error", None)
+                if compact_err:
+                    notes.append(f"compaction failed: {compact_err}; tape unchanged")
+                    ok = False
+                elif before is not None and after is not None and after < before:
+                    notes.append(f"compacted: context {before} → {after} messages")
+                    ok = True
+                else:
+                    notes.append(
+                        f"compaction ran; context {before}→{after} messages "
+                        "(little to compact — already slim?)"
+                    )
+                    ok = True
+            except (asyncio.TimeoutError, TimeoutError):
+                notes.append(
+                    "compact() timed out after 180s; tape unchanged, agent "
+                    "unharmed — retry, or use reanchor if wedged."
+                )
+                ok = False
+            except Exception as exc:
+                notes.append(f"compact() failed: {type(exc).__name__}: {exc}")
+                ok = False
+            return JSONResponse(
+                {"ok": ok, "role": role, "mode": mode, "output": "\n".join(notes)}
+            )
+
+        # --- reanchor: capture breadcrumb + drain backlog, then clear --------
+        recent_block = ""
+        if mode == "reanchor":
+            # Capture the breadcrumb BEFORE clear() wipes the live context.
+            recent_block = _render_recent_turns(agent, role)
+            # Drain the inbox (drop stale backlog). GatedDeque wraps
+            # asyncio.Queue (sagent runtime.py:552); its underlying
+            # ``_queue`` is a ``collections.deque`` we drop directly.
             try:
                 q = agent.runtime.inbox._queue
                 drained = 0
@@ -711,22 +864,46 @@ def _build_http_app(agents):
                 notes.append(f"drained {drained} pending inbox item(s)")
             except AttributeError:
                 notes.append("inbox drain unsupported on this sagent version")
+
+        # --- soft + reanchor: clear() (timeout-guarded) ----------------------
         # ``Agent.clear()`` preempts the in-flight model_call + wipes
         # history + resets the per-tool recall cache. The HotSpare's
         # ``_should_respawn`` check then triggers a fresh ``claude --print``
         # subprocess on the next model call (history.length < last_sent_index).
+        # Bounded by a timeout: a hard-wedged agent can block clear() on
+        # ``await proc.close()`` for a SIGINT-resistant subprocess (observed
+        # on tech-writer); report "needs L3" rather than hang the request.
         try:
-            await agent.clear()
+            await asyncio.wait_for(agent.clear(), timeout=20.0)
             notes.append("history cleared; CLI subprocess will respawn on next turn")
             ok = True
+        except (asyncio.TimeoutError, TimeoutError):
+            notes.append(
+                "clear() timed out after 20s — agent likely hard-wedged on a "
+                "SIGINT-resistant subprocess; escalate to L3 (archive "
+                "session.jsonl + full channel restart)."
+            )
+            ok = False
         except Exception as exc:
             notes.append(f"clear() failed: {type(exc).__name__}: {exc}")
             ok = False
+        # Re-anchor: push the role-specific first turn (+ orientation block).
+        if ok and mode == "reanchor":
+            try:
+                agent.runtime.inbox.push_back(
+                    UserMessage(text=_reanchor_prompt(role, recent_block))
+                )
+                notes.append(
+                    "pushed re-anchor prompt (clear tape: last turns + "
+                    "re-sync directive)"
+                )
+            except Exception as exc:
+                notes.append(f"re-anchor push failed: {type(exc).__name__}: {exc}")
         return JSONResponse(
             {
                 "ok": ok,
                 "role": role,
-                "skip_backlog": skip,
+                "mode": mode,
                 "output": "\n".join(notes),
             }
         )
