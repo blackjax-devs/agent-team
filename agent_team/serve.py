@@ -41,6 +41,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 
 
@@ -52,6 +53,7 @@ import sys
 # sibling chat/ runtime's main.jsonl in one directory.
 from datetime import UTC
 from importlib.resources import files as _pkg_files
+from pathlib import Path
 from typing import Any
 
 from .mcp_sagent import delivery
@@ -75,6 +77,24 @@ _SUPPRESS_FLAG = delivery.SESSIONS_DIR / "_suppress_audit"
 # recent context. The on-disk JSONL is untouched — only the in-memory re-feed
 # is bounded, and every restart re-slims from the full physical history.
 _RESUME_KEEP_RECORDS = int(os.environ.get("AGENT_TEAM_RESUME_KEEP", "120"))
+
+# Resume strategy (AGENT_TEAM_RESUME_MODE): how an agent's persisted tape is
+# brought back on a server restart.
+#   full        — resume the untrimmed tape; first turn re-feeds the whole
+#                 resolved history via `claude --session-id` (the original
+#                 fat-tape boot-wedge risk). Escape hatch.
+#   slim        — trim the tape to its recent tail (`_RESUME_KEEP_RECORDS`)
+#                 then resume; first turn re-feeds the trimmed tail. Today's
+#                 default; deterministic, no model call.
+#   materialize — write claude's session JSONL directly from the resumed
+#                 context (vendored cli_session materializer) and flip the
+#                 provider so turn-1 is a clean native `--resume` of that file
+#                 — NO re-feed, exact mid-thread continuation. Gated by a boot
+#                 drift-canary; falls back to slim if the canary finds the
+#                 claude session format has drifted. The eventual default,
+#                 opt-in until proven on a couple of CLI versions.
+_VALID_RESUME_MODES = ("full", "slim", "materialize")
+_RESUME_MODE = os.environ.get("AGENT_TEAM_RESUME_MODE", "slim").strip().lower()
 
 _LOG = logging.getLogger("agent_team.serve")
 
@@ -183,7 +203,124 @@ def _slim_resume_tape(tape, keep):
     return tail, len(tape) - len(tail)
 
 
-def _resume_agents_from_session_dir(agents) -> None:
+def _probe_claude_version() -> str:
+    """Return the live ``claude --version`` first token (e.g. ``2.1.183``).
+
+    The materialized session JSONL stamps this into every entry's ``version``;
+    it should match the CLI that will ``--resume`` the file. Raises on failure
+    so the caller bails rather than writing a sentinel version.
+    """
+    out = subprocess.run(
+        ["claude", "--version"], capture_output=True, text=True, timeout=10
+    ).stdout.strip()
+    return out.split()[0]
+
+
+def _probe_git_branch(cwd) -> str:
+    """Best-effort current git branch for ``cwd`` (``HEAD`` on any failure)."""
+    try:
+        b = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+        return b or "HEAD"
+    except Exception:
+        return "HEAD"
+
+
+def _materialize_on_resume(label: str, agent) -> bool:
+    """Write claude's session JSONL from the resumed context + flip the seam.
+
+    After ``agent.resume(...)`` the runtime holds the rehydrated (resolved)
+    context. We render it to a CLI-shaped session file at the exact path the
+    provider will read, then set BOTH provider seams so turn-1 is a clean
+    native ``--resume`` instead of a ``--session-id`` full re-feed:
+
+    - ``_session_initialized = True`` → the spawn uses ``--resume <uuid>``
+      (read at ``anthropic_cli.py:1290``).
+    - ``_last_sent_index = len(messages)`` → turn-1's stdin delta
+      (``request.messages[_last_sent_index:]``, line 877) is ~empty, so the
+      N history messages already in the file are NOT re-fed (no double-apply,
+      no wedge). Setting only ``_session_initialized`` would re-feed everything.
+
+    Best-effort: any problem logs a warning, leaves the seams untouched, and
+    returns False — the agent is already correctly resumed, so turn-1 simply
+    falls back to the ``--session-id`` rebuild (the slim/full path). Never
+    raises into the boot loop. Returns True iff the seam was flipped.
+    """
+    from sagent.types.model import ModelRequest
+
+    from agent_team.cli_session import materialize_session
+
+    model = getattr(agent, "model", None)
+    session_id = getattr(model, "_session_id", None)
+    if model is None or session_id is None:
+        return False  # stateless / non-CLI provider — nothing to materialize
+    if (
+        getattr(model, "_session_jsonl_path", None) is None
+        or getattr(model, "_claude_home", None) is None
+    ):
+        return False
+
+    try:
+        messages = list(agent.runtime.context().messages)
+        # The materializer renders request.messages only (system/tools ride on
+        # the CLI argv, not the session file).
+        request = ModelRequest(messages=messages)
+        try:
+            cwd = Path.cwd().resolve()
+        except OSError:
+            cwd = Path.cwd()
+        home = model._claude_home()
+        cli_version = _probe_claude_version()
+        path, _entries = materialize_session(
+            request,
+            session_id=session_id,
+            cwd=cwd,
+            git_branch=_probe_git_branch(cwd),
+            cli_version=cli_version,
+            home=home,
+        )
+    except Exception as exc:
+        _LOG.warning(
+            "materialize %s: failed (%s: %s); turn-1 will --session-id rebuild",
+            label,
+            type(exc).__name__,
+            exc,
+        )
+        return False
+
+    # The path we wrote MUST equal what the provider will --resume; if a
+    # symlinked cwd or HOME made them diverge, do NOT flip the seam.
+    expected = model._session_jsonl_path()
+    if expected is None or Path(expected) != Path(path):
+        _LOG.warning(
+            "materialize %s: path mismatch (wrote %s, provider expects %s); "
+            "NOT flipping seam — turn-1 will rebuild",
+            label,
+            path,
+            expected,
+        )
+        return False
+
+    # Flip both seams: turn-1 → `--resume` with a ~empty stdin delta.
+    model._session_initialized = True
+    model._last_sent_index = len(messages)
+    _LOG.info(
+        "materialize %s: wrote %d-msg session at %s (cli %s); turn-1 will --resume",
+        label,
+        len(messages),
+        path,
+        cli_version,
+    )
+    return True
+
+
+def _resume_agents_from_session_dir(
+    agents, *, materialize_enabled: bool = False
+) -> None:
     """Rehydrate each agent's tape from its sagent ``session.jsonl``.
 
     Standard sagent restart-resume: each role's ``build_agent`` wired a
@@ -196,11 +333,14 @@ def _resume_agents_from_session_dir(agents) -> None:
     feeds only deltas. No claude-session-file parsing -- sagent's own tape is
     the single source of truth.
 
-    Resume-slim (``_RESUME_KEEP_RECORDS``, default on): the resumed tape is
-    trimmed to its recent tail before ``resume`` so the first-turn re-feed
-    stays small — this is the server-level, deterministic answer to the
-    fat-tape boot wedge (a full re-feed of a 1.97 MB tape blows the 25 s
-    MCP-catalog deadline). The on-disk JSONL is untouched.
+    Mode (``AGENT_TEAM_RESUME_MODE``): ``slim`` trims the tape to its recent
+    tail (``_RESUME_KEEP_RECORDS``) so the first-turn re-feed stays small — the
+    deterministic answer to the fat-tape boot wedge. ``full`` resumes the
+    untrimmed tape. ``materialize`` resumes the untrimmed tape AND (when the
+    boot drift-canary passed, ``materialize_enabled``) writes claude's session
+    file from the resolved context + flips the provider so turn-1 is a clean
+    native ``--resume`` (no re-feed at all). The on-disk sagent JSONL is
+    untouched in every mode.
 
     Best-effort and never crashes boot: a per-agent failure logs a
     warning and that agent starts fresh.
@@ -218,20 +358,33 @@ def _resume_agents_from_session_dir(agents) -> None:
                 continue
             meta, tape, tool_state = loaded
             full = len(tape)
-            slimmed, dropped = _slim_resume_tape(tape, _RESUME_KEEP_RECORDS)
+            # Only `slim` trims; `full` and `materialize` resume the whole tape
+            # (materialize writes the file directly, so no re-feed to bound).
+            keep = _RESUME_KEEP_RECORDS if _RESUME_MODE == "slim" else 0
+            slimmed, dropped = _slim_resume_tape(tape, keep)
             agent.resume(meta, slimmed, tool_state)
             if dropped:
                 _LOG.info(
-                    "resume %s: rehydrated %d tape records, slimmed to %d "
+                    "resume %s [%s]: rehydrated %d tape records, slimmed to %d "
                     "(dropped %d older; AGENT_TEAM_RESUME_KEEP=%d)",
                     label,
+                    _RESUME_MODE,
                     full,
                     len(slimmed),
                     dropped,
                     _RESUME_KEEP_RECORDS,
                 )
             else:
-                _LOG.info("resume %s: rehydrated %d tape records", label, full)
+                _LOG.info(
+                    "resume %s [%s]: rehydrated %d tape records",
+                    label,
+                    _RESUME_MODE,
+                    full,
+                )
+            # materialize mode: write the CLI session file from the resolved
+            # context + flip the seam so turn-1 is a clean native --resume.
+            if _RESUME_MODE == "materialize" and materialize_enabled:
+                _materialize_on_resume(label, agent)
         except Exception as exc:
             _LOG.warning(
                 "resume %s: failed (%s: %s); agent starts fresh",
@@ -1446,11 +1599,52 @@ async def _amain(host: str, port: int) -> int:
 
     # Restart-resume: rehydrate each agent's tape from its sagent
     # ``session.jsonl`` BEFORE it starts serving (and before warmup).
-    # On the first turn after resume, the provider re-feeds that tape to
-    # ``claude --session-id`` and rebuilds the CLI session; later turns
-    # ``--resume`` and feed only deltas. Standard sagent persistence --
-    # no claude-session-file parsing.
-    _resume_agents_from_session_dir(agents)
+    # See AGENT_TEAM_RESUME_MODE (full|slim|materialize).
+    if _RESUME_MODE not in _VALID_RESUME_MODES:
+        _LOG.warning(
+            "AGENT_TEAM_RESUME_MODE=%r invalid; using 'slim' (valid: %s)",
+            _RESUME_MODE,
+            "|".join(_VALID_RESUME_MODES),
+        )
+    # materialize mode is gated by a one-shot boot drift-canary: spawn a
+    # throwaway claude, materialize a session, structurally diff vs claude's
+    # own output. On drift (claude changed its session format) we DISABLE
+    # materialize for this boot and fall back to slim, logging the findings.
+    _materialize_enabled = False
+    if _RESUME_MODE == "materialize":
+        try:
+            from agent_team.cli_session import (
+                arun_canary_against_live_cli,
+                is_safe_to_enable,
+            )
+
+            _LOG.info("resume-mode=materialize: running boot drift-canary…")
+            _canary = await arun_canary_against_live_cli()
+            if is_safe_to_enable(_canary.findings):
+                _materialize_enabled = True
+                _LOG.info(
+                    "drift-canary PASSED (cli %s) — materialize-on-resume enabled",
+                    _probe_claude_version(),
+                )
+            else:
+                _LOG.warning(
+                    "drift-canary FOUND DRIFT (%d findings); FALLING BACK TO "
+                    "SLIM for this boot:",
+                    len(_canary.findings),
+                )
+                for _f in _canary.findings:
+                    _LOG.warning(
+                        "  drift %s: %s",
+                        getattr(_f, "location", "?"),
+                        getattr(_f, "detail", "?"),
+                    )
+        except Exception as exc:
+            _LOG.warning(
+                "drift-canary errored (%s: %s); falling back to slim for this boot",
+                type(exc).__name__,
+                exc,
+            )
+    _resume_agents_from_session_dir(agents, materialize_enabled=_materialize_enabled)
 
     serve_tasks = await _serve_agents_forever(agents)
 
