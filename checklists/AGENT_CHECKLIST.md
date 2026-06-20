@@ -119,6 +119,14 @@ The harness notifies you when it exits; you then `Read /tmp/gate.log` for the re
 > **HARD RULE — heavy test gates run in the background, serial on a shared box.**
 > A heavy/slow test gate MUST run in the background — **never inline/synchronously**, by ANY role. **When another agent/session may be active on the box, run the gate serially, not maximally parallel.** Parallel workers roughly multiply peak memory; on a memory-tight shared box that can kill a worker near completion. Serial is slower wall-time but robust — prefer correctness over speed for a merge gate. Serialize compute: one heavy job on the box at a time; the lead gates this.
 
+> **`systemd-run --scope` is for HEAVY jobs only — not a default wrapper.** OOM-isolation
+> scope-wrapping (`systemd-run --user --scope … -- bash -c '<cmd>'`) is the right tool when a
+> background job is genuinely heavy (multi-GB RSS) and an OOM would otherwise cascade up and kill
+> the worker. But wrapping a *light* job is harmful: a ~1.2 GB german_credit re-cert wrapped in a
+> scope was repeatedly killed by **scope lifecycle management (not OOM)** and had to be relaunched
+> as a plain background job to complete. Rule: wrap only jobs you expect to be memory-heavy; launch
+> light jobs (≲ a few GB) as plain background processes.
+
 ### Trial-run budget: 10 minutes
 
 A **trial run** (downscaled invocation to confirm the approach works before committing to a production-scale wall) should generally finish in ≤ 10 minutes. The point of a trial is to **fail fast** — if a trial takes longer than that, something is wrong that more wall won't fix.
