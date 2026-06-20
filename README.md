@@ -81,6 +81,15 @@ untouched. Set `AGENT_TEAM_RESUME_KEEP=0` to disable (resume the full tape), or
 raise it to keep more context. **A server restart is therefore the reliable
 recovery for an agent whose tape has grown too large to re-feed.**
 
+The slim is **anchored across agents on the lead** (`AGENT_TEAM_RESUME_LEAD`,
+default `tl`): the lead is trimmed by record count, the wall-clock floor of its
+recent window is taken from the inbound-message timestamps on its tape, and
+every other agent is trimmed to that same floor. Without this, the busy
+coordinator gets a *shorter* recent window than its quieter peers (same record
+count = less wall-clock), so peers resume holding work the lead has forgotten —
+they desync. Idle agents (no activity since the floor) keep only a last-turn
+breadcrumb, not a stale window.
+
 **Resume mode (`AGENT_TEAM_RESUME_MODE`, default `materialize`).** Three modes:
 - **`materialize`** (default) — instead of re-feeding the tape, write claude's
   session JSONL *directly* from the resumed context and resume it with a native
@@ -113,6 +122,7 @@ intensities per agent (also `POST /api/restart {role, mode}`, loopback-only):
 Related env knobs:
 - `AGENT_TEAM_RESUME_MODE` (default `materialize`) — `materialize` (native `--resume`, canary-gated, effectively-instant startup) | `slim` (fallback) | `full`.
 - `AGENT_TEAM_RESUME_KEEP` (default `120`) — messages kept per tape on resume (slim mode/fallback); `0` resumes the full tape.
+- `AGENT_TEAM_RESUME_LEAD` (default `tl`) — the role whose slim cut anchors every other agent's wall-clock floor (slim mode); empty/absent disables cross-agent anchoring.
 - `AGENT_TEAM_SLIM_MAX_MESSAGES` (default `250`) — max resolved-context size at which a live `slim` is allowed; above it the server refuses and points at a restart.
 - `AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC` (default `25`) — seconds boot waits for the CLI's MCP bridge before respawning.
 - `AGENT_TEAM_COMPACT_TRIGGER` (default `0.80`) — context-utilization fraction at which an agent auto-compacts mid-run.
