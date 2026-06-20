@@ -57,6 +57,48 @@ launch cwd by default; set `SAGENT_DATA_DIR` to relocate it.
 
 `agent-team --help` prints usage and exits without booting the server.
 
+## Restart, recovery & large tapes
+
+The channel persists each agent's full conversation (its sagent *tape*) to
+`SAGENT_DATA_DIR/sessions/<role>.sagent/session.jsonl`, so stopping and
+relaunching `serve` resumes every agent where it left off.
+
+> **After any restart, give the team a few minutes to settle — don't touch
+> anything in the meanwhile.** On boot each agent re-feeds its resumed tape to
+> the `claude` CLI and re-establishes its MCP bridge — a warmup that can run for
+> up to ~90s, after which agents recover on their first real turn (≈2–3 min
+> total). **Don't send work or trigger another restart/slim during this
+> window**: acting on a still-settling agent can crash its compaction and wedge
+> it.
+
+**Resume-slim (automatic).** On each restart, an agent's resumed tape is
+trimmed to roughly its last `AGENT_TEAM_RESUME_KEEP` messages (default `120`),
+snapped to a clean turn boundary, *before* it is re-fed to the CLI. This bounds
+the first-turn re-feed so a large tape (a long-running coordinator can reach
+megabytes) can't stall the MCP handshake on boot. It is deterministic (no model
+call), the on-disk history is never rewritten, and small tapes are left
+untouched. Set `AGENT_TEAM_RESUME_KEEP=0` to disable (resume the full tape), or
+raise it to keep more context. **A server restart is therefore the reliable
+recovery for an agent whose tape has grown too large to re-feed.**
+
+**Per-agent restart (debug console).** The console at `/debug` exposes three
+intensities per agent (also `POST /api/restart {role, mode}`, loopback-only):
+
+| mode | what it does | use when |
+|---|---|---|
+| `slim` | compacts the tape (summarize old turns, keep the recent thread); agent stays on-task | a long-but-healthy agent you don't want to interrupt |
+| `soft` | clears history, preserves the inbox | a blunt reset |
+| `reanchor` | clears history, then re-seeds the last couple of turns + a "re-sync with the lead before acting" directive | recovering a stuck/confused agent |
+
+> `slim` runs a model call to summarize, so use it on a **warm, settled** agent;
+> for a very large or unresponsive tape prefer a server restart (resume-slim)
+> or `reanchor`.
+
+Related env knobs:
+- `AGENT_TEAM_RESUME_KEEP` (default `120`) — messages kept per tape on resume; `0` resumes the full tape.
+- `AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC` (default `25`) — seconds boot waits for the CLI's MCP bridge before respawning.
+- `AGENT_TEAM_COMPACT_TRIGGER` (default `0.80`) — context-utilization fraction at which an agent auto-compacts mid-run.
+
 ## Profiles
 Behavior is driven by a **profile dir** (`AGENT_TEAM_PROFILE_DIR`): a
 [`team.toml`](agent_team/profiles/default/team.toml) (roster, per-role model,
