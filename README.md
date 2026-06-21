@@ -64,12 +64,18 @@ first, then each agent's runtime drains and **persists its tape**, so no work is
 lost and the next launch resumes cleanly. Prefer this over a hard kill.
 
 ```bash
-# Foreground (simplest) — reattach to the tmux window and press Ctrl-C:
-tmux attach -t agent-team        # then Ctrl-C
+# In tmux (recommended) — in the serve window press Ctrl-C, or send it without
+# attaching (the scriptable version of the same graceful stop):
+tmux send-keys -t agent-team C-c
 
-# Detached / scripted — SIGTERM the serve process by its listen port (default 8767):
-kill -TERM "$(ss -ltnHp 'sport = :8767' 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1)"
+# Not in tmux — SIGTERM the process listening on the port (default 8767), but
+# ONLY if one is found (so it's a no-op, not an error, when already stopped):
+pid=$(ss -ltnp 2>/dev/null | grep ':8767 ' | grep -oP 'pid=\K[0-9]+' | head -1)
+[ -n "$pid" ] && kill -TERM "$pid" || echo "no agent-team server on :8767"
 ```
+
+> Don't `pkill -f 'agent-team serve'`: the pattern matches *your own shell/script*
+> (its command line contains the string), so it can signal the wrong process.
 
 Give it a few seconds to drain. If it doesn't exit — a wedged agent can block the
 drain — escalate to `SIGKILL` (`kill -KILL <pid>`); tapes are persisted
