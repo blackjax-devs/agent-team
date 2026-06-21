@@ -57,6 +57,25 @@ launch cwd by default; set `SAGENT_DATA_DIR` to relocate it.
 
 `agent-team --help` prints usage and exits without booting the server.
 
+## Stopping the server
+
+`serve` shuts down **gracefully on `SIGINT`/`SIGTERM`**: the HTTP server stops
+first, then each agent's runtime drains and **persists its tape**, so no work is
+lost and the next launch resumes cleanly. Prefer this over a hard kill.
+
+```bash
+# Foreground (simplest) — reattach to the tmux window and press Ctrl-C:
+tmux attach -t agent-team        # then Ctrl-C
+
+# Detached / scripted — SIGTERM the serve process by its listen port (default 8767):
+kill -TERM "$(ss -ltnHp 'sport = :8767' 2>/dev/null | grep -oP 'pid=\K[0-9]+' | head -1)"
+```
+
+Give it a few seconds to drain. If it doesn't exit — a wedged agent can block the
+drain — escalate to `SIGKILL` (`kill -KILL <pid>`); tapes are persisted
+incrementally, so little is lost. Avoid `tmux kill-session` as a first move: it
+hard-kills the process and skips the graceful drain.
+
 ## Restart, recovery & large tapes
 
 The channel persists each agent's full conversation (its sagent *tape*) to
