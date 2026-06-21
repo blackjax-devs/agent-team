@@ -166,4 +166,4 @@ Presets in the default profile: `dev-team` (the full five) and
 `statistician-only` (a single curated debug agent).
 
 ## License
-MIT — see [LICENSE](LICENSE).
+Apache License 2.0 — see [LICENSE](LICENSE).

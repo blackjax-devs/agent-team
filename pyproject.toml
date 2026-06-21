@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "A configurable, Bayesian-aware multi-agent dev team on sagent + the Claude CLI. Default profile: building/debugging apps that use BlackJAX."
 requires-python = ">=3.12"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 dependencies = [
     # sagent: pinned to a specific KNOWN-GOOD main commit via a DIRECT URL (not
     # [tool.uv.sources], so the pin TRAVELS with a from-git install — `uvx --from
