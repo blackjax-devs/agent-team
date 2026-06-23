@@ -6,17 +6,7 @@ requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 dependencies = [
-    # sagent: pinned to a specific KNOWN-GOOD main commit via a DIRECT URL (not
-    # [tool.uv.sources], so the pin TRAVELS with a from-git install — `uvx --from
-    # git+…/agent-team` resolves this same commit, no `--with` override). We pin a
-    # commit (not @main) for reproducibility: sagent is machine-exported (copybara),
-    # and a *transient* export bug once dropped extra_mcp_servers / session_id /
-    # subprocess_read_timeout_sec from AnthropicCLI.model() (which roles/common.py
-    # passes) — fixed upstream (#197 / PR #198 closed), but the export can hiccup.
-    # This rev (e67b89a) is a current main commit with the full provider API.
-    # nightly-sagent-head.yml watches @main + the signature smoke catches a re-drop.
-    # Switch to a plain "sagent>=0.1.7" once sagent ships a PyPI release.
-    "sagent @ git+https://github.com/rekursiv-ai/sagent.git@e67b89a33c852bb82d3fe13518e40003c843700f",
+    "sagent>=0.1.8",
     "starlette",
     "uvicorn",
     "mcp",
