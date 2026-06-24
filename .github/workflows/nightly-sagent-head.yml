@@ -10,8 +10,12 @@ name: nightly-sagent-head
 # from model() — fixed upstream, #197 / PR #198.) A FAILING run here is the signal
 # that main regressed again before we bump the pin. It gates nothing — own status.
 #
-# How: rewrite the direct-URL sagent pin in pyproject.toml from @<rev> to @main so
-# `uv sync` re-resolves to current HEAD.
+# How: rewrite the sagent dependency in pyproject.toml — in EITHER form (PyPI spec
+# such as "sagent>=0.1.8" or the old git-URL pin "sagent @ git+…@<rev>") — to the
+# git-main URL "sagent @ git+https://github.com/rekursiv-ai/sagent.git@main" so
+# `uv sync` re-resolves to current sagent HEAD.  Fails loudly if no sagent dep is
+# found at all, so a future dep-form change doesn't silently pass (it would just
+# install the pinned/PyPI sagent instead of HEAD).
 
 on:
   schedule:
@@ -39,12 +43,22 @@ jobs:
           import re, pathlib
           p = pathlib.Path("pyproject.toml")
           t = p.read_text()
-          # Rewrite the direct-URL sagent pin (…/sagent.git@<rev-or-branch>) to @main.
-          new, n = re.subn(
-              r'(sagent @ git\+https://github\.com/rekursiv-ai/sagent\.git@)[^"\s]+',
-              r'\1main', t)
+          # Match sagent in either form:
+          #   PyPI spec:   "sagent>=0.1.8"  /  "sagent[extras]>=x"  /  bare "sagent"
+          #   git-URL pin: "sagent @ git+https://github.com/rekursiv-ai/sagent.git@<rev>"
+          # Replace whichever is present with the git-main URL.
+          GIT_MAIN = 'sagent @ git+https://github.com/rekursiv-ai/sagent.git@main'
+          pattern = (
+              r'"sagent\s*(?:@\s*git\+https://github\.com/rekursiv-ai/sagent\.git@[^\s"]+|'
+              r'(?:\[[^\]]*\])?(?:[><=!][^"]*)?)"'
+          )
+          new, n = re.subn(pattern, f'"{GIT_MAIN}"', t)
           if n == 0:
-              raise SystemExit("no sagent direct-URL pin found to retarget — adjust this workflow")
+              raise SystemExit(
+                  "no sagent dependency found in pyproject.toml — "
+                  "the dep was renamed, removed, or moved to a different file; "
+                  "adjust this workflow"
+              )
           p.write_text(new)
           PY
           grep -n 'sagent @ git' pyproject.toml
