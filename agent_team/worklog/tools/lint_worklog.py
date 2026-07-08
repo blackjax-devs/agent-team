@@ -44,7 +44,13 @@ from pathlib import Path
 # Allow running as a script without installation
 sys.path.insert(0, str(Path(__file__).parent))
 from _frontmatter import walk_worklog  # noqa: E402
-from _lintrc import get_exempt_paths, get_sibling_prefixes, load_lintrc, resolve_root  # noqa: E402
+from _lintrc import (  # noqa: E402
+    get_exempt_paths,
+    get_extra_search_roots,
+    get_sibling_prefixes,
+    load_lintrc,
+    resolve_root,
+)
 
 
 REQUIRED_FIELDS = ["status", "date", "tags", "model", "author", "supersedes", "related"]
@@ -52,7 +58,12 @@ VALID_STATUSES = {"CURRENT", "CLOSED", "SUPERSEDED", "PARTIALLY_SUPERSEDED", "DE
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def related_target_exists(r: str, root: Path, sibling_prefixes: tuple[str, ...]) -> bool:
+def related_target_exists(
+    r: str,
+    root: Path,
+    sibling_prefixes: tuple[str, ...],
+    extra_roots: list[Path] | None = None,
+) -> bool:
     """A ``related:`` entry is valid if it's a URL, a sibling-repo path, or resolves on disk.
 
     Resolution order:
@@ -61,12 +72,21 @@ def related_target_exists(r: str, root: Path, sibling_prefixes: tuple[str, ...])
         references without a filesystem check (the sibling repos may not be
         checked out alongside the consuming org's private config in CI).
       * Paths are checked relative to ``root``.
+      * Paths are also checked relative to each path in ``extra_roots`` (useful when
+        the worklog root is a subdirectory of a larger workspace — configure via
+        ``extra_search_roots`` in worklog/.lintrc.yaml).
     """
     if r.startswith(("http://", "https://")):
         return True
     if sibling_prefixes and r.startswith(sibling_prefixes):
         return True
-    return (root / r).exists()
+    if (root / r).exists():
+        return True
+    if extra_roots:
+        for extra in extra_roots:
+            if (extra / r).exists():
+                return True
+    return False
 
 
 def rel(p: Path, root: Path) -> str:
@@ -79,6 +99,7 @@ def lint_file(
     all_files: dict[str, dict],
     root: Path,
     sibling_prefixes: tuple[str, ...],
+    extra_roots: list[Path] | None = None,
 ) -> list[str]:
     """Return list of error strings for this file. Empty = clean."""
     errors: list[str] = []
@@ -112,7 +133,7 @@ def lint_file(
         errors.append(pfx + f"tags must be a list (got {type(tags).__name__})")
 
     for r in fm.get("related") or []:
-        if not related_target_exists(r, root, sibling_prefixes):
+        if not related_target_exists(r, root, sibling_prefixes, extra_roots):
             errors.append(pfx + f"related: target {r!r} does not exist")
 
     for s in fm.get("supersedes") or []:
@@ -172,6 +193,7 @@ def main() -> int:
     cfg = load_lintrc(root)
     exempt_paths = get_exempt_paths(root, cfg)
     sibling_prefixes = get_sibling_prefixes(cfg)
+    extra_roots = get_extra_search_roots(root, cfg)
 
     files = walk_worklog(root)
     all_files = {rel(p, root): fm for p, fm in files}
@@ -198,7 +220,7 @@ def main() -> int:
             )
 
     for path, fm in files:
-        errs = lint_file(path, fm, all_files, root, sibling_prefixes)
+        errs = lint_file(path, fm, all_files, root, sibling_prefixes, extra_roots)
         all_errors.extend(errs)
         if args.verbose and not errs:
             print(f"  ok  {rel(path, root)}")

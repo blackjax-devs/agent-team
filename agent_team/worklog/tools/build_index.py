@@ -46,12 +46,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _frontmatter import walk_worklog  # noqa: E402
-from _lintrc import get_sibling_prefixes, load_lintrc, resolve_root  # noqa: E402
+from _lintrc import get_extra_search_roots, get_sibling_prefixes, load_lintrc, resolve_root  # noqa: E402
 
 WINDOW_DAYS = 30
 
 
-def related_target_exists(r: str, root: Path, sibling_prefixes: tuple[str, ...]) -> bool:
+def related_target_exists(
+    r: str,
+    root: Path,
+    sibling_prefixes: tuple[str, ...],
+    extra_roots: list[Path] | None = None,
+) -> bool:
     """A ``related:`` target is valid if URL, sibling-repo path, or resolves on disk.
 
     Mirrors lint_worklog.related_target_exists — both must agree on the resolution
@@ -62,7 +67,13 @@ def related_target_exists(r: str, root: Path, sibling_prefixes: tuple[str, ...])
         return True
     if sibling_prefixes and r.startswith(sibling_prefixes):
         return True
-    return (root / r).exists()
+    if (root / r).exists():
+        return True
+    if extra_roots:
+        for extra in extra_roots:
+            if (extra / r).exists():
+                return True
+    return False
 
 
 def rel(path: Path, root: Path) -> str:
@@ -79,7 +90,10 @@ def parse_date(s: str | None) -> _dt.date | None:
 
 
 def build_index_text(
-    files: list[tuple[Path, dict]], root: Path, sibling_prefixes: tuple[str, ...]
+    files: list[tuple[Path, dict]],
+    root: Path,
+    sibling_prefixes: tuple[str, ...],
+    extra_roots: list[Path] | None = None,
 ) -> str:
     # Anchor the recent-window on the NEWEST frontmatter date in the corpus, not
     # wall-clock date.today(). Otherwise the generated INDEX (and the --check drift
@@ -130,7 +144,7 @@ def build_index_text(
             orphans.append((p, fm))
 
         for r in fm.get("related", []) or []:
-            if not related_target_exists(r, root, sibling_prefixes):
+            if not related_target_exists(r, root, sibling_prefixes, extra_roots):
                 broken_related.append((p, r))
 
         for s in fm.get("supersedes", []) or []:
@@ -299,10 +313,11 @@ def main() -> int:
     root = resolve_root(args.root)
     cfg = load_lintrc(root)
     sibling_prefixes = get_sibling_prefixes(cfg)
+    extra_roots = get_extra_search_roots(root, cfg)
     index_path = root / "worklog" / "INDEX.md"
 
     files = walk_worklog(root)
-    new_text = build_index_text(files, root, sibling_prefixes)
+    new_text = build_index_text(files, root, sibling_prefixes, extra_roots)
 
     if args.check:
         if not index_path.exists():

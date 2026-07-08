@@ -73,6 +73,28 @@ def get_sibling_prefixes(cfg: dict) -> tuple[str, ...]:
     return tuple(raw)
 
 
+def get_extra_search_roots(root: Path, cfg: dict) -> list[Path]:
+    """Return additional directories to search when resolving ``related:`` paths.
+
+    Useful when the worklog root is a subdirectory of a larger workspace and
+    other files in that workspace are referenced in frontmatter.
+
+    Paths in ``extra_search_roots`` are resolved relative to ``root`` (so ``..``
+    means the parent directory). Example lintrc entry:
+
+        extra_search_roots:
+          - "../.."    # workspace root (two levels above --root)
+    """
+    raw = cfg.get("extra_search_roots", [])
+    result: list[Path] = []
+    for entry in raw:
+        p = Path(entry)
+        if not p.is_absolute():
+            p = (root / p).resolve()
+        result.append(p)
+    return result
+
+
 def resolve_root(root_arg: str | None) -> Path:
     """Resolve the repo root from a CLI arg or default to the current directory."""
     if root_arg is not None:
