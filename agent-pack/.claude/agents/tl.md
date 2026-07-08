@@ -81,6 +81,12 @@ changes unless flagged), the DELIVERABLE shape (a diagnosis with a
 classification + a concrete recommendation), and a pointer to the checklists.
 Let them design the experiment.
 
+**Delivery line.** End every spawn brief with this sentence — it ensures the
+subagent's output reaches you and doesn't get silently dropped at end-of-turn:
+
+> Your plain-text output is NOT visible to the team lead — the LAST action of
+> your run MUST be SendMessage(to: "team-lead") with the full report.
+
 ## Engineering standards (enforce on every spawn)
 
 - Always work on a branch off `main`/`HEAD`, never commit straight to the
