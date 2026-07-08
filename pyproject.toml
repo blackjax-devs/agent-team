@@ -10,11 +10,15 @@ dependencies = [
     "starlette",
     "uvicorn",
     "mcp",
+    "pyyaml",
 ]
 
 [project.scripts]
 agent-team = "agent_team.serve:main"
 agent-team-merge = "agent_team.merge_jsonl:main"
+worklog-lint = "agent_team.worklog.tools.lint_worklog:main"
+worklog-index = "agent_team.worklog.tools.build_index:main"
+worklog-tags = "agent_team.worklog.tools.normalize_tags:main"
 
 [dependency-groups]
 # Test deps for the vendored cli_session/ materializer suite (async canary
@@ -45,4 +49,12 @@ agent_team = [
     "profiles/**/*.toml",
     "profiles/**/*.md",
     "cli_session/*.md",
+]
+
+# Ship the worklog template files so they can be inspected after install.
+[tool.setuptools.data-files]
+"share/agent-team/worklog" = [
+    "worklog/README.md",
+    "worklog/TAGS.template.md",
+    "worklog/pre-commit.template.yaml",
 ]

@@ -1,0 +1,32 @@
+- id: worklog-lint
+  name: worklog schema lint
+  description: >
+    Validate YAML frontmatter on all worklog markdown files.
+    Checks required fields, status enum, date format, and cross-reference integrity.
+  entry: worklog-lint
+  language: python
+  pass_filenames: false
+  files: ^(WORKLOG\.md|worklog/.*\.md)$
+
+- id: worklog-index
+  name: worklog INDEX.md drift check
+  description: >
+    Auto-rebuild worklog/INDEX.md when worklog files change. Exits 0 if already
+    up to date; rebuilds and exits 1 (formatter pattern — git add INDEX.md and
+    re-commit) when stale.
+  entry: worklog-index
+  language: python
+  pass_filenames: false
+  files: ^(WORKLOG\.md|worklog/.*\.md)$
+
+- id: worklog-tags
+  name: worklog tag normalization
+  description: >
+    Fail if any frontmatter tag is non-canonical per the substitution rules in
+    worklog/.lintrc.yaml. Pass --check to keep the hook read-only (recommended
+    for CI); omit --check to rewrite files in-place.
+  entry: worklog-tags
+  args: [--check]
+  language: python
+  pass_filenames: false
+  files: ^(WORKLOG\.md|worklog/.*\.md)$

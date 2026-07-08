@@ -1,0 +1,20 @@
+# .pre-commit-config.yaml — template for consuming agent-team worklog hooks.
+#
+# Copy to your repo's .pre-commit-config.yaml and set the `rev:` to a release tag.
+# Install once: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+#
+# If your worklog/ lives under a subdirectory (e.g. project/worklog/), add
+# `args: [--root, project]` to each hook.
+#
+repos:
+  - repo: https://github.com/blackjax-devs/agent-team
+    rev: v0.1.0  # pin to a release tag; update after each agent-team release
+    hooks:
+      - id: worklog-lint
+        # args: [--root, project]  # uncomment if worklog/ is under project/
+      - id: worklog-index
+        # args: [--root, project]
+      - id: worklog-tags
+        args: [--check]
+        # args: [--root, project, --check]  # uncomment if worklog/ is under project/
