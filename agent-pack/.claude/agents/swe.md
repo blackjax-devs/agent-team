@@ -80,6 +80,41 @@ def build_kernel(**config):
     return kernel
 ```
 
+## Debugging JAX runtime behavior — jax-tap first
+
+[jax-tap](https://github.com/arcueil/jax-tap) (`pip install jax-tap`, import
+`jaxtap as tap`) is the house tool for runtime debugging of JAX control flow.
+When code inside `lax.scan` / `lax.while_loop` / `vmap` misbehaves — NaNs,
+silent non-convergence, suspicious trajectories — reach for it BEFORE
+sprinkling `jax.debug.print`, de-jitting, or rewriting loops in Python:
+
+```python
+import jaxtap as tap
+
+with tap.record() as rec:          # zero code change: taps every scan/while
+    result = sampler(...)          # delete the `with` when done — that's it
+rec.events                         # TapEvent(path, step, value, total) stream
+
+tap.verbose(f, taps=[tap.watch_nan()])   # NaN/Inf caught at its BIRTH SITE:
+                                         # [tap] FAIL scan[0]/cholesky[0] 7/25: NaN/Inf
+tap.verbose(f, taps=[tap.print("dot_general")])  # live-print any primitive
+tap.verbose(f, alert=lambda e: e.value[0] > 5.0) # tripwire on the loop carry
+tap.primitives(f, x)                             # discover what's inside f
+```
+
+Contracts to remember:
+- Event values / `select=` receive the carry's FLAT LEAVES tuple (pytree
+  structure is erased at the jaxpr boundary) — index by position.
+- Progress/heartbeat idiom: `select=lambda _: ()` + `sample_every=N` — zero
+  bytes shipped per event.
+- Taps on `f` observe the forward pass only; tap `jax.grad(f)` to see the
+  backward pass.
+- Overhead is a fixed cost per event — gate hot loops with `sample_every=`
+  (≥10 baseline).
+- The jax-tap repo's `demo/` directory is ten worked debugging case studies
+  (silent NaNs, dead adaptation, treedepth saturation, …) — pattern-match
+  your bug there first.
+
 ## Testing
 
 Identify the project's test runner and conventions before you run anything

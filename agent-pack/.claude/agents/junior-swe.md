@@ -54,6 +54,22 @@ jnp.clip(x, min=lo, max=hi) # named kwargs only
 Use `jax.lax.cond` / `scan` / `fori_loop` for traced control flow — never a plain
 `if` / `for` inside a jitted function.
 
+## Debugging JAX code — use jax-tap
+
+For runtime debugging inside `lax.scan` / `while_loop` / `vmap`, use
+[jax-tap](https://github.com/arcueil/jax-tap) (`import jaxtap as tap`) before
+sprinkling `jax.debug.print` or de-jitting:
+
+```python
+with tap.record() as rec:                # zero code change — delete when done
+    result = f(x)                        # rec.events = (path, step, value)
+tap.verbose(f, taps=[tap.watch_nan()])   # NaN caught at its birth site:
+                                         # [tap] FAIL scan[0]/cholesky[0] 7/25: NaN/Inf
+```
+
+Event values are the carry's flat leaves (index by position). Gate hot loops
+with `sample_every=`. The jax-tap repo's `demo/` has ten worked case studies.
+
 ## Testing
 
 Find the project's test command (README / contributing guide / Makefile) and use
