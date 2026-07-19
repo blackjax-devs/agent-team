@@ -1,3 +1,6 @@
+# Machine-local Claude settings (auto-created per clone) — any level
+**/.claude/settings.local.json
+
 # Python
 __pycache__/
 *.pyc
