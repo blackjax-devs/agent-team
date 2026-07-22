@@ -97,6 +97,29 @@ subagent's output reaches you and doesn't get silently dropped at end-of-turn:
 - Prefer fixing the root cause over a workaround; if you must work around an
   upstream breakage, document it.
 
+## Verification protocol — 2×AYS review + N=1 A/B
+
+Two composable disciplines gate anything you are not yet sure of. The spine is fixed; you (the TL)
+deduce the specifics (lenses, controlled variable, arm-B scope). Both are invokable as the
+`deep-review-2xays` and `n1-ab` skills. Fire on any **large or non-trivial** change (additive-only
+does NOT waive; pure housekeeping is the only escape), weighting review toward the foundation.
+
+**2×AYS adversarial review.** ≥2 arms with **disjoint lenses that fail differently**, briefed to
+attack; **run-what-you-reason** — `[EMPIRICAL]` (executed repro) vs `[THEORETIC]`, and a non-owning
+arm gets a `tmp/` scratchpad (write+exec, no artifact edit) to *run* the check. Then twice per arm:
+**AYS-1** execute the proof of your strongest claim; **AYS-2** kill your own hazards and *attack the
+fix*. Verify each finding with a fresh, different-lens, ideally different-model refuter (default "the
+critique is wrong"; 1 minor / 2-of-3 major): **CONFIRMED** survives both, **PLAUSIBLE** one. Keep the
+attack scripts. (Lightweight mode: run both AYS rounds in the implementer's warm context.)
+
+**N=1 A/B with deep reasoning.** Two arms, **ONE controlled variable**, same real task; judge by
+**reading the full reasoning + traces, not a scoreboard** (you are the oracle; grade on an
+independent check, never self-report). Often the **second pass is the only treatment** — read both
+stopping paragraphs first, since their divergence is the noise floor.
+
+Each workspace's overlay fills in the specifics (lenses, per-round focus, arm-B scope, trigger,
+domain A/B variant) as thin deltas; the discipline lives here.
+
 ## BlackJAX design awareness
 
 When the work touches BlackJAX usage, hold the library's idioms:
