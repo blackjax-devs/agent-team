@@ -64,19 +64,20 @@ jobs:
           grep -n 'sagent @ git' pyproject.toml
 
       - name: Sync against sagent HEAD
-        run: uv sync
+        # This job follows unreleased upstream code, whose transitive
+        # dependencies can intentionally require prerelease packages.
+        run: uv sync --prerelease=allow
 
       - name: Report resolved sagent
         run: uv run python -c "import sagent, importlib.metadata as m; print('sagent', m.version('sagent'), '->', sagent.__file__)"
 
       - name: Run test suite against sagent HEAD
-        run: uvx --with-editable . --with pytest --with pytest-asyncio pytest -q
+        run: uvx --prerelease=allow --with-editable . --with pytest --with pytest-asyncio pytest -q
 
       # The load-bearing check: assert sagent main's AnthropicCLI.model() still
       # accepts the kwargs roles/common.py passes. This is what catches a model()
-      # signature drift on main — the plain import smoke does not reach it. (Right
-      # now this is EXPECTED TO FAIL: main's export dropped all three kwargs. A red
-      # run here = main still incompatible; do not bump the pin.)
+      # signature drift on main — the plain import smoke does not reach it. A red
+      # run here = main is incompatible; do not bump the pin.
       - name: Provider signature smoke against sagent HEAD
         run: |
           uv run python -c "import inspect; from sagent.providers import AnthropicCLI; have=set(inspect.signature(AnthropicCLI.model).parameters); need={'extra_mcp_servers','session_id','subprocess_read_timeout_sec'}; miss=need-have; assert not miss, f'sagent main AnthropicCLI.model() is missing: {sorted(miss)} — agent-team cannot migrate yet'; print('provider model() signature OK on main:', sorted(need))"
@@ -89,4 +90,4 @@ jobs:
       # model()-signature smoke guards model()'s kwargs. A red run = main dropped
       # a seam; do not bump the pin / ship materialize against it.
       - name: Materialize provider-seams smoke against sagent HEAD
-        run: uvx --with-editable . --with pytest --with pytest-asyncio pytest tests/materialize_test.py::test_provider_seams_present -q
+        run: uvx --prerelease=allow --with-editable . --with pytest --with pytest-asyncio pytest tests/materialize_test.py::test_provider_seams_present -q
