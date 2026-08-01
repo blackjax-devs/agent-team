@@ -255,11 +255,14 @@ def _model_spec_for(model_id: str):
     """
     from sagent.types.model import ModelSpec
 
-    return ModelSpec(
-        provider="AnthropicCLI",
-        auth="credentials",
-        model_id=model_id,
-    )
+    parameters = inspect.signature(ModelSpec).parameters
+    if "provider" in parameters:
+        return ModelSpec(
+            provider="AnthropicCLI",
+            auth="credentials",
+            model_id=model_id,
+        )
+    return ModelSpec(model_id=model_id)
 
 
 def _session_id_for(role_name: str, *, namespace: str | None = None) -> str:

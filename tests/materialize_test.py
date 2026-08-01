@@ -30,12 +30,10 @@ Two halves:
 
 import types
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
-from sagent.providers.anthropic_cli import _AnthropicCLIModel
-from sagent.providers.lib.cost import ModelProfile, Pricing
+from sagent.providers import AnthropicCLI
 from sagent.types.runtime import AssistantMessage, UserMessage
 
 from agent_team.cli_session.materializer import session_jsonl_path
@@ -62,26 +60,9 @@ _REQUIRED_SEAMS = (
 _UID = "12345678-1111-2222-3333-444444444444"
 
 
-def _stub_profile() -> ModelProfile:
-    return ModelProfile(
-        max_request_tokens=200_000,
-        max_response_tokens=8_000,
-        supports_thinking=False,
-        pricing=Pricing(),
-    )
-
-
-def _real_model(*, session_id: str = _UID) -> _AnthropicCLIModel:
-    """A real ``_AnthropicCLIModel`` with a mocked provider (no creds/network)."""
-    provider = MagicMock(name="AnthropicCLI")
-    provider.account = None
-    return _AnthropicCLIModel(
-        provider=provider,
-        model_id="claude-opus-4-8",
-        profile=_stub_profile(),
-        max_request_tokens=200_000,
-        session_id=session_id,
-    )
+def _real_model(*, session_id: str = _UID):
+    """Build a real CLI model through sagent's stable public factory."""
+    return AnthropicCLI(account=None).model(session_id=session_id)
 
 
 def test_provider_seams_present():
