@@ -74,7 +74,8 @@ class SandboxedWrite(Write):
         root = Path(sandbox_root)
         if not root.is_absolute():
             raise ValueError(f"sandbox_root must be absolute, got {sandbox_root!r}")
-        self._sandbox_root = root.resolve()
+        # Frozen dataclass bases require this bypass to initialize subclass state.
+        object.__setattr__(self, "_sandbox_root", root.resolve())
 
     @override
     async def run(self, args: Mapping[str, object]) -> ToolResult:
@@ -101,7 +102,8 @@ class SandboxedEdit(Edit):
         root = Path(sandbox_root)
         if not root.is_absolute():
             raise ValueError(f"sandbox_root must be absolute, got {sandbox_root!r}")
-        self._sandbox_root = root.resolve()
+        # Frozen dataclass bases require this bypass to initialize subclass state.
+        object.__setattr__(self, "_sandbox_root", root.resolve())
 
     @override
     async def run(self, args: Mapping[str, object]) -> ToolResult:
