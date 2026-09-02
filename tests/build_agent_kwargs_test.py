@@ -20,6 +20,7 @@ those kwargs). This test checks *our* side: that ``build_agent`` still PASSES th
 mocks the provider, so it needs no live sagent, no credentials, and no network.
 """
 import sagent.agent
+import sagent.types.model
 
 from agent_team.roles import common
 
@@ -52,11 +53,15 @@ class _NoSessionIdProvider:
         return object()
 
 
-def _build(monkeypatch, tmp_path, provider):
+def _legacy_agent(*, model_spec=None, **kwargs):
+    return {"model_spec": model_spec, **kwargs}
+
+
+def _build(monkeypatch, tmp_path, provider, agent_factory=_legacy_agent):
     monkeypatch.setenv("SAGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(common, "build_provider", lambda: provider)
     # Stub Agent: capture-and-return, don't construct a real one (no claude needed).
-    monkeypatch.setattr(sagent.agent, "Agent", lambda **kw: kw)
+    monkeypatch.setattr(sagent.agent, "Agent", agent_factory)
     return common.build_agent(
         role_name="tl", tools=[], model_id="claude-opus-4-8",
         system="You are TL.", session_namespace="test-ns", peers=["tl", "swe"])
@@ -83,3 +88,30 @@ def test_build_agent_omits_session_id_when_provider_lacks_it(monkeypatch, tmp_pa
     assert "session_id" not in call                            # conditional dropped it
     assert "sagent_chat" in (call["extra_mcp_servers"] or {})  # still required
     assert call["subprocess_read_timeout_sec"] == 300.0
+
+
+def test_build_agent_passes_model_recipe_to_new_sagent(monkeypatch, tmp_path):
+    sentinel = object()
+
+    def new_agent(*, model_recipe=None, **kwargs):
+        return {"model_recipe": model_recipe, **kwargs}
+
+    monkeypatch.setattr(common, "_model_recipe_for", lambda model_id: sentinel)
+    built = _build(monkeypatch, tmp_path, _FullSigProvider(), new_agent)
+    assert built["model_recipe"] is sentinel
+    assert "model_spec" not in built
+
+
+def test_model_recipe_prefers_new_sagent_name(monkeypatch):
+    class Recipe:
+        def __init__(self, *, provider, auth, model_id):
+            self.provider = provider
+            self.auth = auth
+            self.model_id = model_id
+
+    monkeypatch.setattr(sagent.types.model, "ModelRecipe", Recipe, raising=False)
+    recipe = common._model_recipe_for("claude-opus-4-8")
+    assert isinstance(recipe, Recipe)
+    assert recipe.provider == "AnthropicCLI"
+    assert recipe.auth == "credentials"
+    assert recipe.model_id == "claude-opus-4-8"
