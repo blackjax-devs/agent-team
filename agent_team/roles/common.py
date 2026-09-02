@@ -246,23 +246,27 @@ def _sagent_mcp_server_entry(role: str) -> dict[str, Any]:
     }
 
 
-def _model_spec_for(model_id: str):
-    """Build a ``ModelSpec`` that lets ``AgentSelf`` swap the model later.
+def _model_recipe_for(model_id: str):
+    """Build the recipe that lets ``AgentSelf`` swap the model later.
 
-    Without a spec, ``AgentSelf(model_id=...)`` rejects with
-    "Agent has no model spec; cannot swap" — the runtime needs to
-    know how to reconstruct the provider for the new model.
+    Sagent 0.1.17 renamed ``ModelSpec`` to ``ModelRecipe``.  Prefer the new
+    name while retaining compatibility with the released versions that
+    agent-team still supports.
     """
-    from sagent.types.model import ModelSpec
+    from sagent.types import model as model_types
 
-    parameters = inspect.signature(ModelSpec).parameters
+    recipe_type = getattr(model_types, "ModelRecipe", None)
+    if recipe_type is None:
+        recipe_type = model_types.ModelSpec
+
+    parameters = inspect.signature(recipe_type).parameters
     if "provider" in parameters:
-        return ModelSpec(
+        return recipe_type(
             provider="AnthropicCLI",
             auth="credentials",
             model_id=model_id,
         )
-    return ModelSpec(model_id=model_id)
+    return recipe_type(model_id=model_id)
 
 
 def _session_id_for(role_name: str, *, namespace: str | None = None) -> str:
@@ -423,9 +427,8 @@ def build_agent(
             role_name, namespace=session_namespace
         )
 
-    return Agent(
+    agent_kwargs: dict[str, Any] = dict(
         model=provider.model(model_id, **model_kwargs),
-        model_spec=_model_spec_for(model_id),
         system=system_prompt,
         tools=list(tools),
         name=role_name,
@@ -438,3 +441,9 @@ def build_agent(
         max_budget_usd=max_budget_usd,
         compactor=compactor,
     )
+    agent_parameters = inspect.signature(Agent).parameters
+    recipe_kwarg = (
+        "model_recipe" if "model_recipe" in agent_parameters else "model_spec"
+    )
+    agent_kwargs[recipe_kwarg] = _model_recipe_for(model_id)
+    return Agent(**agent_kwargs)
