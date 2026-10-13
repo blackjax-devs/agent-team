@@ -348,49 +348,84 @@ def _probe_git_branch(cwd) -> str:
 
 
 def _materialize_on_resume(label: str, agent) -> bool:
-    """Write claude's session JSONL from the resumed context + flip the seam.
+    """Write claude's session JSONL and mark the resumed history as delivered.
 
     After ``agent.resume(...)`` the runtime holds the rehydrated (resolved)
     context. We render it to a CLI-shaped session file at the exact path the
-    provider will read, then set BOTH provider seams so turn-1 is a clean
+    provider will read, then set the provider state so turn-1 is a clean
     native ``--resume`` instead of a ``--session-id`` full re-feed:
 
-    - ``_session_initialized = True`` → the spawn uses ``--resume <uuid>``
-      (read at ``anthropic_cli.py:1290``).
-    - ``_last_sent_index = len(messages)`` → turn-1's stdin delta
-      (``request.messages[_last_sent_index:]``, line 877) is ~empty, so the
+    - ``_session_on_disk = True`` → the spawn uses ``--resume <uuid>``.
+      Older providers call this state ``_session_initialized``.
+    - ``_last_sent_index = len(messages)`` → turn-1's stdin delta is empty, so the
       N history messages already in the file are NOT re-fed (no double-apply,
-      no wedge). Setting only ``_session_initialized`` would re-feed everything.
+      no wedge). Setting only the on-disk flag would re-feed everything.
+    - ``_unanswered = None`` → no historical input is owed a retry.
 
     Best-effort: any problem logs a warning, leaves the seams untouched, and
     returns False — the agent is already correctly resumed, so turn-1 simply
     falls back to the ``--session-id`` rebuild (the slim/full path). Never
-    raises into the boot loop. Returns True iff the seam was flipped.
+    raises into the boot loop. Returns True iff the provider state was updated.
     """
+    from uuid import UUID
+
     from sagent.types.model import ModelRequest
 
-    from agent_team.cli_session import materialize_session
-
-    model = getattr(agent, "model", None)
-    session_id = getattr(model, "_session_id", None)
-    if model is None or session_id is None:
-        return False  # stateless / non-CLI provider — nothing to materialize
-    if (
-        getattr(model, "_session_jsonl_path", None) is None
-        or getattr(model, "_claude_home", None) is None
-    ):
-        return False
+    from agent_team.cli_session import materialize_session, session_jsonl_path
 
     try:
-        messages = list(agent.runtime.context().messages)
-        # The materializer renders request.messages only (system/tools ride on
-        # the CLI argv, not the session file).
-        request = ModelRequest(messages=messages)
+        model = getattr(agent, "model", None)
+        session_id = getattr(model, "_session_id", None)
+        if session_id is None:
+            return False  # stateless / non-CLI provider — nothing to materialize
+        UUID(session_id)
+        path_helper = getattr(model, "_session_jsonl_path", None)
+        if not callable(path_helper) or not hasattr(model, "_last_sent_index"):
+            return False
+        if hasattr(model, "_session_on_disk"):
+            if not hasattr(model, "_unanswered"):
+                return False  # incomplete current session contract
+            state = {"_session_on_disk": True, "_unanswered": None}
+        elif hasattr(model, "_session_initialized"):
+            state = {"_session_initialized": True}
+        else:
+            return False
+
+        # The provider owns the config root (including named accounts and
+        # CLAUDE_CONFIG_DIR). Validate its target before touching any file.
+        expected = path_helper()
+        if expected is None:
+            return False
+        expected = Path(expected)
+        config_dir = expected.parent.parent.parent
         try:
             cwd = Path.cwd().resolve()
         except OSError:
             cwd = Path.cwd()
-        home = model._claude_home()
+        if (
+            expected.name != f"{session_id}.jsonl"
+            or expected.parent.parent.name != "projects"
+            or session_jsonl_path(
+                session_id, cwd=cwd, config_dir=config_dir
+            ) != expected
+            or (
+                os.environ.get("CLAUDE_CONFIG_DIR")
+                and getattr(model, "_persistent_tmpdir", None) is None
+                and config_dir != Path(os.environ["CLAUDE_CONFIG_DIR"])
+            )
+        ):
+            _LOG.warning(
+                "materialize %s: path mismatch (provider expects %s); "
+                "NOT changing state — turn-1 will rebuild",
+                label,
+                expected,
+            )
+            return False
+
+        messages = list(agent.runtime.context().messages)
+        # The materializer renders request.messages only (system/tools ride on
+        # the CLI argv, not the session file).
+        request = ModelRequest(messages=messages)
         cli_version = _probe_claude_version()
         path, _entries = materialize_session(
             request,
@@ -398,8 +433,27 @@ def _materialize_on_resume(label: str, agent) -> bool:
             cwd=cwd,
             git_branch=_probe_git_branch(cwd),
             cli_version=cli_version,
-            home=home,
+            config_dir=config_dir,
         )
+        if Path(path) != expected:
+            _LOG.warning(
+                "materialize %s: path mismatch (wrote %s, provider expects %s); "
+                "NOT changing state — turn-1 will rebuild",
+                label,
+                path,
+                expected,
+            )
+            return False
+
+        state["_last_sent_index"] = len(messages)
+        previous = {key: getattr(model, key) for key in state}
+        try:
+            for key, value in state.items():
+                setattr(model, key, value)
+        except Exception:
+            for key, value in previous.items():
+                setattr(model, key, value)
+            raise
     except Exception as exc:
         _LOG.warning(
             "materialize %s: failed (%s: %s); turn-1 will --session-id rebuild",
@@ -409,22 +463,6 @@ def _materialize_on_resume(label: str, agent) -> bool:
         )
         return False
 
-    # The path we wrote MUST equal what the provider will --resume; if a
-    # symlinked cwd or HOME made them diverge, do NOT flip the seam.
-    expected = model._session_jsonl_path()
-    if expected is None or Path(expected) != Path(path):
-        _LOG.warning(
-            "materialize %s: path mismatch (wrote %s, provider expects %s); "
-            "NOT flipping seam — turn-1 will rebuild",
-            label,
-            path,
-            expected,
-        )
-        return False
-
-    # Flip both seams: turn-1 → `--resume` with a ~empty stdin delta.
-    model._session_initialized = True
-    model._last_sent_index = len(messages)
     _LOG.info(
         "materialize %s: wrote %d-msg session at %s (cli %s); turn-1 will --resume",
         label,
@@ -1706,24 +1744,6 @@ async def _amain(host: str, port: int) -> int:
         profile.session_id_namespace,
         profile.roster,
     )
-
-    # Big resumed tapes slow the first-turn full-history re-feed to the CLI,
-    # which can push the MCP-catalog connect past sagent's default 8s ceiling
-    # (anthropic_cli._MCP_CONNECT_TIMEOUT_SEC) and raise SubprocessTransportError
-    # on a cold turn -> respawn loop (observed 2026-06-19, swe). Raise that
-    # ceiling host-side (module constant, read at call time) so a slow cold
-    # start tolerates the load instead of erroring. Env-tunable; the real fix is
-    # smaller tapes (earlier compaction, see roles/common.py).
-    import sagent.providers.anthropic_cli as _acli
-
-    _mcp_to = float(os.environ.get("AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC", "25"))
-    if _mcp_to != _acli._MCP_CONNECT_TIMEOUT_SEC:
-        _LOG.info(
-            "MCP-connect ceiling: %.0fs (sagent default %.1fs)",
-            _mcp_to,
-            _acli._MCP_CONNECT_TIMEOUT_SEC,
-        )
-        _acli._MCP_CONNECT_TIMEOUT_SEC = _mcp_to
 
     agents = _build_all_agents(profile)
     _LOG.info("brought up %d agents: %s", len(agents), sorted(agents))
