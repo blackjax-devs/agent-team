@@ -68,7 +68,13 @@ _MAT_UUID_NS = _uuid.UUID("c0f3a1d2-7e5b-4c8a-9d6f-1a2b3c4d5e6f")
 _FIXED_TIMESTAMP = "2026-01-01T00:00:00.000Z"
 
 
-def session_jsonl_path(session_id: str, *, cwd: Path, home: Path | None = None) -> Path:
+def session_jsonl_path(
+    session_id: str,
+    *,
+    cwd: Path,
+    home: Path | None = None,
+    config_dir: Path | None = None,
+) -> Path:
     """Compute the on-disk path the CLI uses for this session.
 
     Mirrors the CLI's encoded-cwd convention: replace every non-
@@ -79,12 +85,14 @@ def session_jsonl_path(session_id: str, *, cwd: Path, home: Path | None = None) 
         session_id: Session UUID (the file stem).
         cwd: Absolute working directory the CLI is spawned in.
         home: Override for ``$HOME`` (test seam).
+        config_dir: Explicit CLI configuration directory. When supplied,
+            overrides ``home`` and places ``projects/`` directly inside it.
 
     Returns:
-        Absolute path under ``<home>/.claude/projects/<encoded-cwd>/<uuid>.jsonl``.
+        Path under ``<config_dir>/projects/<encoded-cwd>/<uuid>.jsonl``;
+        defaults to ``<home>/.claude`` for the configuration directory.
 
     """
-    home = home or Path(os.environ.get("HOME", "~")).expanduser()
     # Canonicalize cwd (symlinks resolved) to match the provider's
     # ``_session_jsonl_path`` (anthropic_cli.py:1567) byte-for-byte — else a
     # symlinked spawn cwd makes the materializer write a different file than
@@ -94,7 +102,10 @@ def session_jsonl_path(session_id: str, *, cwd: Path, home: Path | None = None) 
     except OSError:
         pass
     encoded = re.sub(r"[^A-Za-z0-9-]", "-", str(cwd))
-    return home / ".claude" / "projects" / encoded / f"{session_id}.jsonl"
+    if config_dir is None:
+        home = home or Path(os.environ.get("HOME", "~")).expanduser()
+        config_dir = home / ".claude"
+    return config_dir / "projects" / encoded / f"{session_id}.jsonl"
 
 
 def materialize_session(
@@ -106,6 +117,7 @@ def materialize_session(
     cli_version: str = "0.0.0-materialized",
     timestamp: str = _FIXED_TIMESTAMP,
     home: Path | None = None,
+    config_dir: Path | None = None,
     write: bool = True,
 ) -> tuple[Path, list[dict[str, Any]]]:
     """Render ``request.messages`` as a CLI-shaped JSONL and (optionally) write it.
@@ -133,6 +145,7 @@ def materialize_session(
             reconstruct wall-clock per message; the CLI doesn't need
             it for ``--resume``).
         home: Override for ``$HOME`` (test seam).
+        config_dir: Explicit CLI configuration directory, overriding ``home``.
         write: When False, build the entry list but don't touch disk.
             Used by tests + the tripwire.
 
@@ -149,7 +162,7 @@ def materialize_session(
         cli_version=cli_version,
         timestamp=timestamp,
     )
-    path = session_jsonl_path(session_id, cwd=cwd, home=home)
+    path = session_jsonl_path(session_id, cwd=cwd, home=home, config_dir=config_dir)
     if write:
         _atomic_write(path, entries)
     return path, entries

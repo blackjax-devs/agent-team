@@ -19,10 +19,17 @@ those kwargs). This test checks *our* side: that ``build_agent`` still PASSES th
 — and that the ``session_id`` conditional (defensive against a re-drop) holds. It
 mocks the provider, so it needs no live sagent, no credentials, and no network.
 """
+import inspect
+import types
+
+import pytest
+
 import sagent.agent
 import sagent.types.model
+from sagent.providers import AnthropicCLI
 
 from agent_team.roles import common
+from agent_team import serve
 
 
 class _FullSigProvider:
@@ -32,10 +39,12 @@ class _FullSigProvider:
         self.calls = []
 
     def model(self, model_id=None, max_request_tokens=None, *,
-              extra_mcp_servers=None, session_id=None, subprocess_read_timeout_sec=None):
+              extra_mcp_servers=None, session_id=None, subprocess_read_timeout_sec=None,
+              mcp_connect_timeout_sec=None):
         self.calls.append(dict(
             model_id=model_id, extra_mcp_servers=extra_mcp_servers,
-            session_id=session_id, subprocess_read_timeout_sec=subprocess_read_timeout_sec))
+            session_id=session_id, subprocess_read_timeout_sec=subprocess_read_timeout_sec,
+            mcp_connect_timeout_sec=mcp_connect_timeout_sec))
         return object()
 
 
@@ -59,6 +68,7 @@ def _legacy_agent(*, model_spec=None, **kwargs):
 
 def _build(monkeypatch, tmp_path, provider, agent_factory=_legacy_agent):
     monkeypatch.setenv("SAGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(common, "_session_dir_for", lambda role: tmp_path / role)
     monkeypatch.setattr(common, "build_provider", lambda: provider)
     # Stub Agent: capture-and-return, don't construct a real one (no claude needed).
     monkeypatch.setattr(sagent.agent, "Agent", agent_factory)
@@ -68,6 +78,7 @@ def _build(monkeypatch, tmp_path, provider, agent_factory=_legacy_agent):
 
 
 def test_build_agent_passes_required_model_kwargs(monkeypatch, tmp_path):
+    monkeypatch.delenv("AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC", raising=False)
     p = _FullSigProvider()
     _build(monkeypatch, tmp_path, p)
     assert len(p.calls) == 1
@@ -77,6 +88,61 @@ def test_build_agent_passes_required_model_kwargs(monkeypatch, tmp_path):
     assert call["subprocess_read_timeout_sec"] == 300.0, call
     # session_id passed because this provider's model() accepts it.
     assert call["session_id"] is not None, call
+    assert call["mcp_connect_timeout_sec"] == 25.0, call
+
+
+def test_build_agent_passes_custom_mcp_connect_timeout(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC", "41.5")
+    provider = _FullSigProvider()
+    _build(monkeypatch, tmp_path, provider)
+    assert provider.calls[0]["mcp_connect_timeout_sec"] == 41.5
+
+
+def test_build_agent_uses_actual_legacy_provider_module(monkeypatch, tmp_path):
+    module = types.ModuleType("legacy_cli")
+    module._MCP_CONNECT_TIMEOUT_SEC = 8.0
+    provider = _NoSessionIdProvider()
+    getmodule = inspect.getmodule
+    monkeypatch.setattr(
+        common.inspect, "getmodule",
+        lambda obj: module if obj == provider.model else getmodule(obj),
+    )
+    monkeypatch.setenv("AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC", "42")
+    _build(monkeypatch, tmp_path, provider)
+    assert module._MCP_CONNECT_TIMEOUT_SEC == 42.0
+
+
+@pytest.mark.parametrize("timeout", [None, "41.5"])
+def test_build_agent_configures_real_provider_timeout(monkeypatch, tmp_path, timeout):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    if timeout is None:
+        monkeypatch.delenv("AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC", raising=False)
+        expected = 25.0
+    else:
+        monkeypatch.setenv("AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC", timeout)
+        expected = float(timeout)
+    provider = AnthropicCLI(account="default")
+    built = _build(monkeypatch, tmp_path, provider)
+    model = built["model"]
+    assert model._mcp_connect_timeout_sec == expected
+
+
+async def test_startup_reaches_agent_build_without_legacy_provider_import(
+    monkeypatch,
+):
+    class ReachedBuild(Exception):
+        pass
+
+    def stop(profile):
+        raise ReachedBuild
+
+    monkeypatch.setattr(serve, "_build_all_agents", stop)
+    # _amain sets this variable before it constructs agents; restore it after
+    # the smoke so later tests don't inherit a changed server port.
+    monkeypatch.setenv("SAGENT_HTTP_PORT", "8767")
+    with pytest.raises(ReachedBuild):
+        await serve._amain("127.0.0.1", 9876)
 
 
 def test_build_agent_omits_session_id_when_provider_lacks_it(monkeypatch, tmp_path):

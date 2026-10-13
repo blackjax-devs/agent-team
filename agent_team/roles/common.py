@@ -422,10 +422,26 @@ def build_agent(
     # dropped this kwarg from ``model()`` (fixed upstream, #197/#198), so pass it
     # only if the provider's ``model()`` still accepts it — defensive against a
     # re-drop, with no behaviour change when it's present (the normal case).
-    if "session_id" in inspect.signature(provider.model).parameters:
+    model_parameters = inspect.signature(provider.model).parameters
+    if "session_id" in model_parameters:
         model_kwargs["session_id"] = _session_id_for(
             role_name, namespace=session_namespace
         )
+
+    # Cold starts with large resumed tapes can outlast the provider's default
+    # MCP-catalog deadline. Configure each model through its public API; older
+    # providers instead read a module constant at connection time.
+    mcp_connect_timeout_sec = float(
+        os.environ.get("AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC", "25")
+    )
+    if "mcp_connect_timeout_sec" in model_parameters:
+        model_kwargs["mcp_connect_timeout_sec"] = mcp_connect_timeout_sec
+    else:
+        provider_module = inspect.getmodule(provider.model)
+        if provider_module is not None and hasattr(
+            provider_module, "_MCP_CONNECT_TIMEOUT_SEC"
+        ):
+            provider_module._MCP_CONNECT_TIMEOUT_SEC = mcp_connect_timeout_sec
 
     agent_kwargs: dict[str, Any] = dict(
         model=provider.model(model_id, **model_kwargs),
