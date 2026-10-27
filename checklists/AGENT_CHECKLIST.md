@@ -37,17 +37,17 @@ The general rule: **never assume the command from one project carries to another
 
 ## 2. Implementation discipline
 
-### Anti-narration rule
-Do NOT write transitional narration between tool calls — no "Now let me…", "Good, now I'll…", "Perfect! The linter ran…". Just emit the next tool call. Narration correlates with the harness's end-of-turn heuristic firing; it has truncated work mid-task. Emit results, not commentary.
+### Progress updates
+Give concise updates when findings, risks or next steps change. Follow the active client's communication requirements; avoid narrating routine tool calls.
 
 ### Scratch-file rule
 Any multi-line Python — **especially with `#` comments** — goes into a scratch file (e.g. `/tmp/foo.py`), then run that file. NEVER multi-line `python -c "..."` containing `#` (path-validation guards can reject it). Single-line `python -c "..."` is OK.
 
-### Two-commit structure
-For each logical task, prefer **two commits**: commit-1 = code + tests; commit-2 = registration / wiring (`__init__.py`, registry, exports). Bisect-clean, easy to review.
+### Commit structure
+Keep commits coherent and independently reviewable. Use the project's conventions; no fixed number of commits is required.
 
 ### Git hygiene
-Use read-only git verbs (`status`, `diff`, `log`, `branch`, `show`, `blame`, `ls-files`, `rev-parse`) freely. Treat mutating verbs (`commit`, `push`, `reset`, `checkout`, `merge`) as requiring deliberate intent — confirm before running them.
+Use ordinary Git within the user's task authorization and repository rules. Preserve other agents' changes; shared checkout mutations need authorization for that scope. Work in an owned worktree for PRs, and keep hooks and CI enabled.
 
 ### File ownership
 The spawn brief lists exactly which files you may edit and which you must not touch. If you discover the brief is wrong (e.g., a file outside your list needs edits), STOP and surface to the lead — do not silently expand scope.
