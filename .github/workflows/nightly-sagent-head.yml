@@ -2,13 +2,13 @@ name: nightly-sagent-head
 
 # DRIFT DETECTOR (separate from CI on purpose).
 #
-# CI (ci.yml) tests against our PINNED, known-good sagent commit. This workflow
+# CI (ci.yml) tests against the sagent version uv.lock pins. This workflow
 # instead resolves sagent from main HEAD and runs the same suite PLUS the
-# provider-signature smoke, so we learn — nightly — if sagent main drifts away from
-# the API agent-team targets. (It caught exactly this once: a transient copybara
-# export bug dropped extra_mcp_servers / session_id / subprocess_read_timeout_sec
-# from model() — fixed upstream, #197 / PR #198.) A FAILING run here is the signal
-# that main regressed again before we bump the pin. It gates nothing — own status.
+# sagent-seams smoke, so we learn — nightly — if sagent main drifts away from
+# the API agent-team targets, before that lands in a release. (sagent 0.2.0
+# reorganised the whole package; this is the job that should have told us.)
+# A FAILING run here is the signal that main changed under us: port before
+# bumping the lock. It gates nothing — own status.
 #
 # How: rewrite the sagent dependency in pyproject.toml — in EITHER form (PyPI spec
 # such as "sagent>=0.1.8" or the old git-URL pin "sagent @ git+…@<rev>") — to the
@@ -74,20 +74,9 @@ jobs:
       - name: Run test suite against sagent HEAD
         run: uvx --prerelease=allow --with-editable . --with pytest --with pytest-asyncio pytest -q
 
-      # The load-bearing check: assert sagent main's AnthropicCLI.model() still
-      # accepts the kwargs roles/common.py passes. This is what catches a model()
-      # signature drift on main — the plain import smoke does not reach it. A red
-      # run here = main is incompatible; do not bump the pin.
-      - name: Provider signature smoke against sagent HEAD
-        run: |
-          uv run python -c "import inspect; from sagent.providers import AnthropicCLI; have=set(inspect.signature(AnthropicCLI.model).parameters); need={'extra_mcp_servers','session_id','subprocess_read_timeout_sec'}; miss=need-have; assert not miss, f'sagent main AnthropicCLI.model() is missing: {sorted(miss)} — agent-team cannot migrate yet'; print('provider model() signature OK on main:', sorted(need))"
-
-      # The `materialize` resume mode reaches into private _AnthropicCLIModel
-      # internals (the session_id kwarg → _session_id, plus _session_initialized
-      # / _last_sent_index / _claude_home / _session_jsonl_path) to flip turn-1
-      # to a native `--resume`. If main renames/removes any of those seams, our
-      # materialize wiring silently breaks — this guards them the same way the
-      # model()-signature smoke guards model()'s kwargs. A red run = main dropped
-      # a seam; do not bump the pin / ship materialize against it.
-      - name: Materialize provider-seams smoke against sagent HEAD
-        run: uvx --prerelease=allow --with-editable . --with pytest --with pytest-asyncio pytest tests/materialize_test.py::test_provider_seams_present -q
+      # The load-bearing check: assert sagent main still offers every class,
+      # argument and field agent-team passes it (tests/sagent_seams_test.py).
+      # A red run here with the seam named = main renamed or dropped it; do
+      # not bump the lock until agent-team is ported.
+      - name: sagent seams smoke against sagent HEAD
+        run: uvx --prerelease=allow --with-editable . --with pytest --with pytest-asyncio pytest tests/sagent_seams_test.py -q

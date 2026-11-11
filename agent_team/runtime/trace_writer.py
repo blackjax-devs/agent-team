@@ -15,9 +15,9 @@
 Each agent's ``runtime.publish`` is called for every RuntimeEvent — model
 call lifecycle (``ModelCallStarted``, ``ModelResponsePartial``,
 ``ModelResponseComplete``, ``ModelIdle``), inbox arrivals
-(``AgentSendMessage``, ``UserMessage``), tool labels (``ToolLabel``),
-cohort transitions (``CohortStarted``, ``CohortComplete``), session
-saves (``SaveSession``), etc.
+(``AgentToAgentMessage``, ``UserMessage``), tool results, cohort
+transitions (``CohortStarted``, ``CohortComplete``), session saves
+(``SaveSession``), etc.
 
 Chat/'s parity: in the chat runtime each ``chat consume`` worker
 captured its claude subprocess's NDJSON stream into a per-role
@@ -29,7 +29,10 @@ build time.
 Each line is a single JSON dict with ``_event`` carrying the typed
 RuntimeEvent class name plus the event's fields. Non-JSON-serializable
 fields (asyncio tasks, MCP bridge handles, etc.) fall through to
-``repr()``.
+``repr()``. The few fields the web UI and ``/api/search`` render — an
+inbound message's ``text`` / ``source``, a reply's ``message.text`` /
+``message.tool_calls``, a failure's ``error`` — are written alongside, read
+off the event (see :func:`_ui_fields`).
 
 Cheap append per event; one ``fcntl.LOCK_EX`` per write keeps lines
 atomic if two agents ever shared the same file (they don't — one file
@@ -38,6 +41,7 @@ per agent — but the locking is harmless and matches ``shim.append_record``).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -93,13 +97,53 @@ def _to_jsonable(obj: Any) -> Any:
                 except Exception:
                     out[f.name] = repr(getattr(obj, f.name, None))
             return out
-    if isinstance(obj, dict):
+    if isinstance(obj, Mapping):
         return {str(k): _to_jsonable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple, set)):
         return [_to_jsonable(v) for v in obj]
     if isinstance(obj, bytes):
         return repr(obj)
     return repr(obj)
+
+
+def _ui_fields(event: Any) -> dict[str, Any]:
+    """The fields the web UI and ``/api/search`` read, for the events they render.
+
+    sagent names an inbound message's body ``content`` and its origin
+    ``sender``, and hands a finished reply over as ``response.records`` (text,
+    reasoning and tool calls, in order). The viewers read ``text`` / ``source``
+    and ``message.text`` / ``message.tool_calls``; those are derived here.
+    Dispatch is by class name, so this module needs no sagent import.
+    """
+    kind = type(event).__name__
+    if kind in ("UserMessage", "AgentToAgentMessage"):
+        fields: dict[str, Any] = {"text": getattr(event, "content", None) or ""}
+        if kind == "AgentToAgentMessage":
+            fields["source"] = getattr(event, "sender", None) or ""
+        return fields
+    if kind == "ModelResponseComplete":
+        records = getattr(getattr(event, "response", None), "records", None) or ()
+        return {
+            "message": {
+                "text": "".join(
+                    getattr(r, "content", None) or ""
+                    for r in records
+                    if type(r).__name__ == "AssistantMessage"
+                ),
+                "tool_calls": [
+                    {
+                        "name": getattr(r, "name", ""),
+                        "args": _to_jsonable(getattr(r, "arguments", {})),
+                    }
+                    for r in records
+                    if type(r).__name__ == "ToolCall"
+                ],
+            }
+        }
+    if kind == "ModelResponseError":
+        exc = getattr(event, "exception", None)
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    return {}
 
 
 def trace_path_for(role_name: str, *, sessions_dir: Path | str | None = None) -> Path:
@@ -135,6 +179,7 @@ class TraceWriter:
             "_ts": _iso_now(),
             "_n": self._ordinal,
             **payload,
+            **_ui_fields(event),
         }
         self._ordinal += 1
         line = json.dumps(record, ensure_ascii=False) + "\n"

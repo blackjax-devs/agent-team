@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 _ROLE = "statistician"
 
 
-def build(profile: "Profile"):
+def build(profile: "Profile", **agent_kwargs):
     """Construct the Statistician Agent.
 
     Read-anywhere. Edit/Write restricted to ``profile.sandbox_root``
@@ -39,7 +39,12 @@ def build(profile: "Profile"):
     """
     from ..team_profile import render_prompt
 
-    from sagent import tools
+    from sagent.tools.bash import Bash
+    from sagent.tools.glob_tool import Glob
+    from sagent.tools.grep import Grep
+    from sagent.tools.read import Read
+    from sagent.tools.web_fetch import WebFetch
+    from sagent.tools.web_search import WebSearch
 
     from .. import sandboxed_tools
 
@@ -49,16 +54,16 @@ def build(profile: "Profile"):
         role_name=_ROLE,
         system=render_prompt(profile, _ROLE),
         tools=[
-            tools.Read(),
-            tools.Grep(),
-            tools.Glob(),
-            tools.Bash(),
-            tools.WebSearch(),
-            tools.WebFetch(),
+            Read(),
+            Grep(),
+            Glob(),
+            Bash(),
+            WebSearch(),
+            WebFetch(),
             sandboxed_tools.SandboxedWrite(sandbox_root=sandbox),
             sandboxed_tools.SandboxedEdit(sandbox_root=sandbox),
         ],
         model_id=profile.models.get(_ROLE, MODEL_OPUS),
-        session_namespace=profile.session_id_namespace,
         peers=profile.roster,
+        **agent_kwargs,
     )

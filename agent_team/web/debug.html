@@ -296,11 +296,16 @@ document.querySelectorAll('.tab').forEach(t =>
 //   - AgentIdle : agent went back to idle
 //   - ToolLabel : MCP-side tool dispatch label (text channel)
 //   - SaveSession / CohortStarted / CohortComplete : housekeeping
+// A peer's inbound message: sagent >=0.2 names the event AgentToAgentMessage;
+// traces written by sagent 0.1 hold AgentSendMessage.
+function isPeerMessage(kind) {
+  return kind === 'AgentToAgentMessage' || kind === 'AgentSendMessage';
+}
 function traceEventLine(ev, q) {
   const kind = ev._event || '?';
   const ts = `<span class="ets">${fmtTime(ev._ts)}</span>`;
-  if (kind === 'UserMessage' || kind === 'AgentSendMessage') {
-    const src = kind === 'AgentSendMessage' ? (ev.source || '?') : 'user';
+  if (kind === 'UserMessage' || isPeerMessage(kind)) {
+    const src = isPeerMessage(kind) ? (ev.source || '?') : 'user';
     const body = (ev.text || '').split('\n').find(l => l.trim()) || '';
     return `${ts}<span class="mk-begin">▶ inbound</span> from @${esc(src)}  ${hl(body.slice(0,260), q)}`;
   }
@@ -336,7 +341,7 @@ function traceEventLine(ev, q) {
 // [show full input/output] affordance).
 function traceEventFull(ev) {
   const kind = ev._event || '?';
-  if ((kind === 'UserMessage' || kind === 'AgentSendMessage') && ev.text) {
+  if ((kind === 'UserMessage' || isPeerMessage(kind)) && ev.text) {
     return { label: 'full inbound', text: ev.text };
   }
   if (kind === 'ModelResponseComplete' && ev.message && ev.message.text) {

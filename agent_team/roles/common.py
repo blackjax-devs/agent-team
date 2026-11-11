@@ -14,14 +14,15 @@
 
 Conventions:
 
-- All roles use ``AnthropicCLI.from_credentials()`` (Claude subscription,
-  no API key consulted).
+- All roles use sagent's ``AnthropicCLI`` provider (Claude subscription via
+  the ``claude`` CLI's login; no API key consulted).
 - Peer messaging happens via the plugin's MCP server (``mcp_sagent.server``)
-  rather than sagent's bridge-mounted ``AgentSend``. The MCP server's
-  ``sagent_send`` tool appears in the CLI's catalog as
-  ``mcp__sagent_chat__sagent_send`` and works structurally on all three
-  models (haiku/sonnet/opus) — see README § "Episode 3" for the probe
-  result that motivated the design.
+  rather than sagent's ``AgentSend``. ``serve.py`` connects one server per
+  role through ``sagent.tools.mcp.McpSession`` and hands its tools to the
+  agent, so ``sagent_send`` reaches the model as
+  ``mcp__sagent_chat__sagent_send`` on all three models
+  (haiku/sonnet/opus) — see README § "Episode 3" for the probe result
+  that motivated the design.
 - Heavy background commands must be wrapped in ``systemd-run --user
   --scope --quiet --collect -- bash -c '<cmd>'`` to keep an OOM
   contained in a sibling cgroup instead of cascading through the
@@ -32,15 +33,27 @@ Conventions:
 
 from __future__ import annotations
 
-import inspect
+import os
+import sys
 
 from collections.abc import Sequence
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from sagent.compaction.summary import SummaryCompactor
-from sagent.types.tools import Tool
+from sagent.agent.compactor import SummaryCompactor, summary_tokens
+from sagent.tools.types import Tool, ToolContext
 
+
+if TYPE_CHECKING:
+    from sagent.agent.types import Journal
+    from sagent.providers.types import Provider
+    from sagent.tools.mcp import McpServer, McpSession
+
+
+# Name of the peer-messaging MCP server: the ``<server>`` in every
+# ``mcp__<server>__<tool>`` name the role prompts teach.
+CHAT_SERVER_NAME = "sagent_chat"
 
 # Optional model-id fallbacks. The authoritative role→model assignment now
 # comes from the loaded profile's ``[models]`` table (``profile.models``);
@@ -50,14 +63,6 @@ MODEL_OPUS = "claude-opus-4-8"
 MODEL_FABLE = "claude-fable-5"
 MODEL_SONNET = "claude-sonnet-4-6"
 MODEL_HAIKU = "claude-haiku-4-5"
-
-# Fixed UUID namespace for deriving per-role session ids. Combined with the
-# profile's ``session_id_namespace`` string so two deployments don't collide.
-_SESSION_UUID_NAMESPACE = "9e0e2c30-3f7e-4a13-9f5b-1a3a2c4d5e6f"
-# Fallback session-id namespace string when no profile namespace is threaded
-# through. Generic framework default; real deployments always override this
-# via ``profile.session_id_namespace`` (see ``team.toml [team]``).
-_DEFAULT_SESSION_NAMESPACE = "agent-team"
 
 HEAVY_BG_REMINDER = """\
 Operating reminder: if a job is expected to be heavy (memory or CPU), \
@@ -194,20 +199,21 @@ def load_system_prompt(
     return compose_system_prompt(body, peers=peers)
 
 
-def build_provider():
-    """Construct the shared AnthropicCLI provider.
+def build_provider() -> Provider:
+    """Construct the AnthropicCLI provider every role's model comes from.
 
-    One provider instance is shared across all five roles (it owns
-    only credentials + the bridge URL; per-agent state lives on the
-    Model returned by ``provider.model(...)``).
+    One provider is shared across the roster: it owns the tool server each
+    model's ``claude`` reaches its tools through and the ``claude`` process
+    pool; per-agent state lives on the model ``provider[model_id]`` returns.
+    The caller closes it (``async with`` / ``aclose``).
     """
-    from sagent.providers import AnthropicCLI
+    from sagent.providers.anthropic.cli import AnthropicCLI
 
-    return AnthropicCLI.from_credentials()
+    return AnthropicCLI()
 
 
 def _sagent_mcp_server_entry(role: str) -> dict[str, Any]:
-    """Per-role stdio MCP entry for the CLI's ``--mcp-config``.
+    """Per-role stdio entry for the peer-messaging MCP server.
 
     Spawns ``python -m agent_team.mcp_sagent.server`` with three env vars:
 
@@ -216,16 +222,13 @@ def _sagent_mcp_server_entry(role: str) -> dict[str, Any]:
       - ``SAGENT_HTTP_URL``: where to POST ``/api/post`` and
         ``/api/defer`` — i.e. ``serve.py``'s loopback URL. The MCP
         server runs in a SEPARATE Python process from ``serve.py``,
-        so its in-process ``agent_registry`` is empty; HTTP is the
-        only way to reach the live registry.
+        so it cannot reach the live agents directly; HTTP is the
+        only way in.
       - ``SAGENT_DATA_DIR``: where ``main.jsonl``, the sentinel,
         the debug log, and the per-role trace files live. Inherited
         from the parent ``serve.py`` env so audit/data files
-        co-locate across the three-process tree.
+        co-locate across the process tree.
     """
-    import os
-    import sys
-
     from ..mcp_sagent.config_factory import SERVER_MODULE
 
     port = os.environ.get("SAGENT_HTTP_PORT", "8767")
@@ -234,8 +237,7 @@ def _sagent_mcp_server_entry(role: str) -> dict[str, Any]:
         "SAGENT_HTTP_URL": f"http://127.0.0.1:{port}",
     }
     # Propagate the data dir only if explicitly set — if absent, both
-    # parent and child fall back to the plugin source dir, which
-    # matches anyway.
+    # parent and child fall back to the launch cwd, which matches anyway.
     data_dir = os.environ.get("SAGENT_DATA_DIR")
     if data_dir:
         env_out["SAGENT_DATA_DIR"] = data_dir
@@ -246,61 +248,111 @@ def _sagent_mcp_server_entry(role: str) -> dict[str, Any]:
     }
 
 
-def _model_recipe_for(model_id: str):
-    """Build the recipe that lets ``AgentSelf`` swap the model later.
+def chat_server(role: str) -> McpServer:
+    """Return the peer-messaging MCP server for ``role``, as sagent configures one.
 
-    Sagent 0.1.17 renamed ``ModelSpec`` to ``ModelRecipe``.  Prefer the new
-    name while retaining compatibility with the released versions that
-    agent-team still supports.
+    The name must stay :data:`CHAT_SERVER_NAME`: sagent names each tool
+    ``mcp__<server>__<tool>``, and the role prompts teach
+    ``mcp__sagent_chat__sagent_send`` / ``__sagent_defer`` / ``__sagent_self``.
     """
-    from sagent.types import model as model_types
+    from mcp import StdioServerParameters
+    from sagent.tools.mcp import McpServer
 
-    recipe_type = getattr(model_types, "ModelRecipe", None)
-    if recipe_type is None:
-        recipe_type = model_types.ModelSpec
-
-    parameters = inspect.signature(recipe_type).parameters
-    if "provider" in parameters:
-        return recipe_type(
-            provider="AnthropicCLI",
-            auth="credentials",
-            model_id=model_id,
-        )
-    return recipe_type(model_id=model_id)
+    entry = _sagent_mcp_server_entry(role)
+    return McpServer(
+        name=CHAT_SERVER_NAME,
+        parameters=StdioServerParameters(
+            command=entry["command"],
+            args=entry["args"],
+            env=entry["env"],
+        ),
+        description=f"agent-team peer messaging for {role}",
+    )
 
 
-def _session_id_for(role_name: str, *, namespace: str | None = None) -> str:
-    """Stable per-role UUIDv5 (so server restarts ``--resume`` the same
-    session rather than orphaning the prior one).
+def mcp_connect_timeout_sec() -> float:
+    """How long the peer-messaging MCP server may take to connect.
 
-    Uses a fixed UUID namespace combined with the deployment's
-    ``session_id_namespace`` string (from the profile's ``[team]`` table) so
-    the same role under the same deployment always derives the same
-    session_id, while two deployments on the same machine/cwd don't collide.
-    When ``namespace`` is ``None`` the generic framework default
-    (:data:`_DEFAULT_SESSION_NAMESPACE`) is used. To start fresh,
-    ``rm $HOME/.claude/projects/-<encoded-cwd>/<uuid>.jsonl`` (or use a
-    different ``SAGENT_DATA_DIR``).
+    Env-tunable via ``AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC`` (default 25s): a
+    loaded host can take a while to import the server.
     """
-    import uuid as _uuid
+    return float(os.environ.get("AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC", "25"))
 
-    ns_str = namespace or _DEFAULT_SESSION_NAMESPACE
-    namespace_uuid = _uuid.UUID(_SESSION_UUID_NAMESPACE)
-    return str(_uuid.uuid5(namespace_uuid, f"{ns_str}:{role_name}"))
+
+def chat_session(role: str) -> McpSession:
+    """Return the (unopened) MCP session holding ``role``'s peer-messaging server.
+
+    ``async with`` it, then pass ``session.tools()`` to :func:`build_agent` as
+    ``chat_tools``: that is what gives the role ``sagent_send`` / ``sagent_defer``
+    / ``sagent_self``. The session owns the server subprocess.
+    """
+    from sagent.tools.mcp import McpSession
+
+    return McpSession(
+        [chat_server(role)],
+        connect_timeout_sec=mcp_connect_timeout_sec(),
+    )
+
+
+def compact_trigger() -> float:
+    """Share of the context window at which an agent compacts.
+
+    Env-tunable via ``AGENT_TEAM_COMPACT_TRIGGER`` (default 0.80). We fire
+    EARLIER than sagent's own trigger: a lower trigger keeps the resumed
+    context small, so the first-turn full-history re-feed after a restart stays
+    fast — AND it makes agents compact while HEALTHY. A wedged subprocess
+    CANNOT compact: observed 2026-06-19, swe's compaction failed 'subprocess
+    stdout closed' because it had already wedged before ever reaching the
+    trigger, so its 1.2 MB tape never shrank.
+    """
+    return float(os.environ.get("AGENT_TEAM_COMPACT_TRIGGER", "0.80"))
+
+
+def _summary_room(body: float, *, trigger: float) -> float:
+    """Room held back for a ``body``-token context's summary.
+
+    ``SummaryCompactor`` compacts once ``body + room(body)`` no longer fits the
+    window, so holding back ``body * (1 - trigger) / trigger`` makes it due at
+    ``trigger`` of the window. Never less than sagent's own reserve.
+    """
+    reserve = summary_tokens(body)
+    if not 0.0 < trigger < 1.0:
+        return reserve
+    return max(reserve, body * (1.0 - trigger) / trigger)
+
+
+def compactor_factory():
+    """Return what builds each agent's compactor.
+
+    Without a compactor, the agent's context grows uncapped and the provider
+    hits the context-window edge for heavy multi-PR work — observed in
+    production as SWE's 3.4M cache_read_input_tokens over a ~5h session, with
+    increasing ``aborted_streaming`` retryable errors and eventual stream-cuts.
+    sagent owns compaction; claude's auto-compact is disabled by the provider.
+    """
+    return partial(
+        SummaryCompactor,
+        summary_tokens=partial(_summary_room, trigger=compact_trigger()),
+    )
 
 
 def _session_dir_for(role_name: str) -> Path:
     """Per-role sagent persistence dir (holds ``session.jsonl``).
 
-    Lives under the data dir so ``serve.py`` restarts can
-    ``load_session`` + ``Agent.resume`` each role's tape. Co-located
-    with the per-role traces under ``<SAGENT_DATA_DIR>/sessions/``.
+    Lives under the data dir so ``serve.py`` restarts resume each role's
+    session. Co-located with the per-role traces under
+    ``<SAGENT_DATA_DIR>/sessions/``.
     """
     from ..mcp_sagent import delivery
 
     path = delivery.SESSIONS_DIR / f"{role_name}.sagent"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def journal_path_for(role_name: str) -> Path:
+    """Where ``role_name``'s session journal is written."""
+    return _session_dir_for(role_name) / "session.jsonl"
 
 
 def build_agent(
@@ -310,27 +362,20 @@ def build_agent(
     model_id: str,
     system: str | None = None,
     role_md_path: Path | None = None,
-    session_namespace: str | None = None,
     peers: Sequence[str] | None = None,
     max_tool_call_rounds: int | None = None,
     max_budget_usd: float | None = None,
+    provider: Provider | None = None,
+    journal: Journal | None = None,
+    chat_tools: Sequence[Tool] = (),
 ):
     """Construct a sagent Agent for a role with shared defaults baked in.
 
-    The plugin's MCP server (``mcp_sagent/server.py``) is auto-wired
-    into the agent's ``claude --print`` subprocess via
-    ``provider.model(..., extra_mcp_servers={"sagent": {...}})``. The
-    role label is baked into the MCP server's env, so the server
-    knows which agent it serves on every CallToolRequest.
-
     Args:
-        role_name: Label used in ``agent_registry`` and as the ``name``
-            field on the Agent. Must match the role's label used in
-            ``sagent_send(to=...)`` calls from peers.
+        role_name: The role's label: the agent's name in its team, and the
+            label peers use in ``sagent_send(to=...)``.
         tools: Sequence of sagent Tool instances allowed for this role.
-            Does NOT include AgentSend or AgentSelf — those live in
-            the MCP server (``mcp__sagent_chat__sagent_send``,
-            ``mcp__sagent_chat__sagent_self``).
+            Does NOT include peer messaging — pass that as ``chat_tools``.
         model_id: Claude model id (from ``profile.models[role]``).
         system: Pre-rendered role-prompt body (``{{workspace}}`` already
             filled by :func:`team_profile.render_prompt`). The standing
@@ -338,19 +383,26 @@ def build_agent(
             ``role_md_path``; one of the two must be provided.
         role_md_path: Back-compat fallback — path to a role-prompt markdown
             file read directly when ``system`` is not given.
-        session_namespace: Deployment session-id namespace (from
-            ``profile.session_id_namespace``); ``None`` falls back to the
-            historical default.
         peers: Active roster used to build the peer-messaging known-peers
             list; ``None`` falls back to the historical default roster.
-        max_tool_call_rounds: Per-turn cap; ``None`` for sagent default.
+        max_tool_call_rounds: Per-turn cap; ``None`` for no cap.
         max_budget_usd: Per-agent USD cap; ``None`` disables.
+        provider: The shared provider (:func:`build_provider`); ``None``
+            builds one this agent's model alone uses.
+        journal: Where the session is written and what a restart resumes
+            from — an OPEN journal, such as ``JsonlJournal`` at
+            :func:`journal_path_for`. ``None`` keeps the session in memory.
+        chat_tools: The peer-messaging tools of :func:`chat_session`
+            (``mcp__sagent_chat__sagent_send`` and friends), connected with
+            ``SAGENT_ROLE=role_name`` so the server knows which agent it
+            serves on every call.
 
     Returns:
-        A configured Agent ready to be registered + driven.
+        A configured Agent; ``async with`` it (or ``aopen``) to run it.
 
     """
-    from sagent.agent import Agent
+    from sagent.agent.agent import Agent
+    from sagent.agent.agents_md import AgentsMdConfig
 
     if system is not None:
         system_prompt = compose_system_prompt(system, peers=peers)
@@ -359,107 +411,19 @@ def build_agent(
     else:
         raise ValueError("build_agent requires either 'system' or 'role_md_path'")
 
-    provider = build_provider()
-    # Stdout-idle timeout for the ``claude`` subprocess transport
-    # (Subproc default is 60s). Bumped to 300s to accommodate
-    # long-running synchronous Bash tool calls — e.g. a project's
-    # ``pre-commit run`` (type-checking / linting touched files, often
-    # 60-120s), ``uv run python ...`` calibration scripts (JIT
-    # warmup + compilation can be 60+s), heavy test suites. Without
-    # the bump, the transport reads claude's silence during the tool
-    # wait as a hang, raises ``SubprocessTransportError``, sagent's
-    # ``send_with_retry`` retries the model call in-place, and the
-    # retried response diverges from the cached partial — emitting
-    # the divergence marker AND eating the closing assistant message
-    # (the peer ``sagent_send`` back to TL never lands). See worklog
-    # ``v2.1-cli-session-materialize`` § 2026-06-09 for the 7 SWE
-    # divergence diagnosis. 300s is well below opus/sonnet's
-    # 9-10min mid-turn API duration ceiling, so we still catch real
-    # hangs without false-positive timing out on legitimate work.
-    subprocess_read_timeout_sec = 300.0
+    if provider is None:
+        provider = build_provider()
 
-    # SummaryCompactor wired. Without a compactor, the agent's tape
-    # grows uncapped and the provider hits the API output-cap /
-    # context-window edge for heavy multi-PR work — observed in
-    # production as SWE's 3.4M cache_read_input_tokens over a ~5h
-    # session, with increasing ``aborted_streaming`` retryable errors
-    # and eventual stream-cuts. SummaryCompactor's defaults
-    # (``utilization_trigger=0.95``, ``compression=0.075``) fire
-    # compaction at ~95% of the usable window after reserving 7.5%
-    # for the compacted result; the resulting ``ContextSplice`` rides
-    # sagent's tape and is fed to claude on the next turn. sagent owns
-    # compaction; claude's auto-compact is disabled by the provider.
-    #
-    # We fire EARLIER than the 0.95 default (env-tunable AGENT_TEAM_COMPACT_
-    # TRIGGER, default 0.80). A lower trigger keeps the resumed tape small, so
-    # the first-turn full-history re-feed after a restart stays fast — AND it
-    # makes agents compact while HEALTHY. A wedged subprocess CANNOT compact:
-    # observed 2026-06-19, swe's compaction failed 'subprocess stdout closed'
-    # because it had already wedged before ever reaching 0.95, so its 1.2 MB
-    # tape never shrank and every cold turn slow-started past the 8s MCP limit.
-    import os
-
-    _compact_trigger = float(os.environ.get("AGENT_TEAM_COMPACT_TRIGGER", "0.80"))
-    compactor = SummaryCompactor(utilization_trigger=_compact_trigger)
-
-    # NOTE: must not collide with sagent's bridge server name (``"sagent"``,
-    # hardcoded at sagent/providers/lib/mcp_bridge.py:175). The bridge
-    # exposes Read/Bash/Glob/Grep/etc. as ``mcp__sagent__<tool>``; the
-    # plugin's MCP server exposes peer-messaging as
-    # ``mcp__sagent_chat__sagent_send`` / ``__sagent_defer`` /
-    # ``__sagent_self``.
-    # extra_mcp_servers (peer messaging) + the read timeout are required by every
-    # CLI-backed agent — passed unconditionally.
-    model_kwargs: dict[str, Any] = {
-        "extra_mcp_servers": {"sagent_chat": _sagent_mcp_server_entry(role_name)},
-        "subprocess_read_timeout_sec": subprocess_read_timeout_sec,
-    }
-    # CLI session-persistence (``--session-id``/``--resume``) keeps the prompt
-    # cache warm across turns, but it is an OPTIONAL optimization: sagent's tape is
-    # the source of truth (the provider rebuilds claude's on-disk session from it
-    # on the first turn, incl. after a restart once ``Agent.resume`` rehydrated the
-    # tape from ``session.jsonl``). A transient sagent export regression once
-    # dropped this kwarg from ``model()`` (fixed upstream, #197/#198), so pass it
-    # only if the provider's ``model()`` still accepts it — defensive against a
-    # re-drop, with no behaviour change when it's present (the normal case).
-    model_parameters = inspect.signature(provider.model).parameters
-    if "session_id" in model_parameters:
-        model_kwargs["session_id"] = _session_id_for(
-            role_name, namespace=session_namespace
-        )
-
-    # Cold starts with large resumed tapes can outlast the provider's default
-    # MCP-catalog deadline. Configure each model through its public API; older
-    # providers instead read a module constant at connection time.
-    mcp_connect_timeout_sec = float(
-        os.environ.get("AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC", "25")
+    return Agent(
+        model=provider[model_id],
+        system_prompt=system_prompt,
+        tools=[*tools, *chat_tools],
+        journal=journal,
+        compactor=compactor_factory(),
+        tool_context=ToolContext(label=role_name),
+        max_rounds=max_tool_call_rounds,
+        max_spend_usd=max_budget_usd,
+        # A role's prompt is its profile's, whole: no AGENTS.md of the host's
+        # (the operator's own sagent directives, or the launch cwd's) joins it.
+        agents_md=AgentsMdConfig(tiers=frozenset()),
     )
-    if "mcp_connect_timeout_sec" in model_parameters:
-        model_kwargs["mcp_connect_timeout_sec"] = mcp_connect_timeout_sec
-    else:
-        provider_module = inspect.getmodule(provider.model)
-        if provider_module is not None and hasattr(
-            provider_module, "_MCP_CONNECT_TIMEOUT_SEC"
-        ):
-            provider_module._MCP_CONNECT_TIMEOUT_SEC = mcp_connect_timeout_sec
-
-    agent_kwargs: dict[str, Any] = dict(
-        model=provider.model(model_id, **model_kwargs),
-        system=system_prompt,
-        tools=list(tools),
-        name=role_name,
-        # sagent-owned persistence: writes ``<session_dir>/session.jsonl``
-        # so a ``serve.py`` restart can ``load_session`` + ``Agent.resume``
-        # the tape (which then drives the CLI session rebuild). This is
-        # the standard sagent resume path — no claude-session-file parsing.
-        session_dir=_session_dir_for(role_name),
-        max_tool_call_rounds=max_tool_call_rounds,
-        max_budget_usd=max_budget_usd,
-        compactor=compactor,
-    )
-    agent_parameters = inspect.signature(Agent).parameters
-    recipe_kwarg = (
-        "model_recipe" if "model_recipe" in agent_parameters else "model_spec"
-    )
-    agent_kwargs[recipe_kwarg] = _model_recipe_for(model_id)
-    return Agent(**agent_kwargs)

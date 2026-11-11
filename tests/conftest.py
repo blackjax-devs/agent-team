@@ -14,3 +14,14 @@
 # ``uvx --with-editable . --with pytest pytest``; locally use
 # ``uv run --with pytest pytest``). No ``sys.path`` shimming is needed —
 # the package is importable from its installed/editable location.
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _private_user_dirs(tmp_path_factory, monkeypatch):
+    """Keep sagent's per-user files (tool locks, MCP server logs) out of the
+    developer's own state and data directories."""
+    home = tmp_path_factory.mktemp("userdirs")
+    monkeypatch.setenv("XDG_STATE_HOME", str(home / "state"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / "data"))

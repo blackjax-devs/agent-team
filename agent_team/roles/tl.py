@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 _ROLE = "tl"
 
 
-def build(profile: "Profile"):
+def build(profile: "Profile", **agent_kwargs):
     """Construct the TL Agent.
 
     TL is read-only by scope (no Edit/Write); coordinates by reading
@@ -36,27 +36,32 @@ def build(profile: "Profile"):
 
     Peer messaging + self-defer + status-report live in the MCP
     server's tool catalog and are NOT in ``tools=[...]``. See
-    ``mcp_sagent/server.py`` and the per-agent ``--mcp-config``
-    threaded by :func:`common.build_agent`.
+    ``mcp_sagent/server.py`` and the ``chat_tools`` threaded through
+    :func:`common.build_agent`.
 
     Model + system prompt come from the loaded profile.
     """
     from ..team_profile import render_prompt
 
-    from sagent import tools
+    from sagent.tools.bash import Bash
+    from sagent.tools.glob_tool import Glob
+    from sagent.tools.grep import Grep
+    from sagent.tools.read import Read
+    from sagent.tools.web_fetch import WebFetch
+    from sagent.tools.web_search import WebSearch
 
     return build_agent(
         role_name=_ROLE,
         system=render_prompt(profile, _ROLE),
         tools=[
-            tools.Read(),
-            tools.Grep(),
-            tools.Glob(),
-            tools.Bash(),
-            tools.WebSearch(),
-            tools.WebFetch(),
+            Read(),
+            Grep(),
+            Glob(),
+            Bash(),
+            WebSearch(),
+            WebFetch(),
         ],
         model_id=profile.models.get(_ROLE, MODEL_OPUS),
-        session_namespace=profile.session_id_namespace,
         peers=profile.roster,
+        **agent_kwargs,
     )

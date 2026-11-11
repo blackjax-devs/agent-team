@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 _ROLE = "swe"
 
 
-def build(profile: "Profile"):
+def build(profile: "Profile", **agent_kwargs):
     """Construct the SWE Agent.
 
     SWE has full code-edit scope across the workspace (excluding the
@@ -37,20 +37,25 @@ def build(profile: "Profile"):
     """
     from ..team_profile import render_prompt
 
-    from sagent import tools
+    from sagent.tools.bash import Bash
+    from sagent.tools.edit import Edit
+    from sagent.tools.glob_tool import Glob
+    from sagent.tools.grep import Grep
+    from sagent.tools.read import Read
+    from sagent.tools.write import Write
 
     return build_agent(
         role_name=_ROLE,
         system=render_prompt(profile, _ROLE),
         tools=[
-            tools.Read(),
-            tools.Edit(),
-            tools.Write(),
-            tools.Bash(),
-            tools.Grep(),
-            tools.Glob(),
+            Read(),
+            Edit(),
+            Write(),
+            Bash(),
+            Grep(),
+            Glob(),
         ],
         model_id=profile.models.get(_ROLE, MODEL_SONNET),
-        session_namespace=profile.session_id_namespace,
         peers=profile.roster,
+        **agent_kwargs,
     )

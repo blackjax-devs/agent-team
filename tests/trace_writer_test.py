@@ -102,6 +102,56 @@ def test_non_serializable_field_falls_back_to_repr(tmp_path: Path) -> None:
         loop.close()
 
 
+def test_mapping_fields_serialize_as_objects(tmp_path: Path) -> None:
+    """sagent holds a record's JSON fields read-only (``MappingProxyType``)."""
+    from types import MappingProxyType
+
+    w = trace_writer.TraceWriter("tl", sessions_dir=tmp_path)
+    w(_FakeWeirdEvent(name="x", handle=MappingProxyType({"to": "user", "n": 1})))
+    rec = json.loads((tmp_path / "tl.trace.jsonl").read_text().strip())
+    assert rec["handle"] == {"to": "user", "n": 1}
+
+
+def test_sagent_events_carry_the_fields_the_web_ui_reads(tmp_path: Path) -> None:
+    """The viewers read ``text`` / ``source`` / ``message`` / ``error``."""
+    from sagent.model.scripted import call, reply
+    from sagent.runtime.types import ModelResponseComplete, ModelResponseError
+    from sagent.session.types import AgentToAgentMessage, UserMessage
+
+    w = trace_writer.TraceWriter("tl", sessions_dir=tmp_path)
+    w(UserMessage(content="status report?"))
+    w(AgentToAgentMessage(sender="swe", content="PR is up"))
+    w(
+        ModelResponseComplete(
+            response=reply(
+                "on it", calls=[call("Read", "c1", file_path="a.py"), call("Bash", "c2")]
+            )
+        )
+    )
+    w(ModelResponseError(exception=RuntimeError("claude exited")))
+    user, peer, done, failed = (
+        json.loads(line)
+        for line in (tmp_path / "tl.trace.jsonl").read_text().splitlines()
+    )
+    assert (user["_event"], user["text"]) == ("UserMessage", "status report?")
+    assert "source" not in user
+    assert (peer["_event"], peer["text"], peer["source"]) == (
+        "AgentToAgentMessage",
+        "PR is up",
+        "swe",
+    )
+    assert done["message"] == {
+        "text": "on it",
+        "tool_calls": [
+            {"name": "Read", "args": {"file_path": "a.py"}},
+            {"name": "Bash", "args": {}},
+        ],
+    }
+    # sagent's own shape is still there, beside the derived fields.
+    assert done["response"]["stop_reason"] == "tool_use"
+    assert failed["error"] == "RuntimeError: claude exited"
+
+
 def test_ordinal_increments_and_persists_across_instances(tmp_path: Path) -> None:
     w1 = trace_writer.TraceWriter("tl", sessions_dir=tmp_path)
     w1(_FakeAssistantMessage(text="a"))

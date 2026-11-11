@@ -6,8 +6,8 @@
 
 [team]
 name = "agent-team"
-# uuid5 namespace for per-role session ids. Change per deployment so two
-# deployments on the same machine/cwd don't collide on claude session files.
+# Deployment label, logged at boot. (Sessions are kept apart by SAGENT_DATA_DIR:
+# each role's journal lives under it. This once namespaced claude session ids.)
 session_id_namespace = "agent-team"
 
 [workspace]
