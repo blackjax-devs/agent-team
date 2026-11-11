@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 dependencies = [
-    "sagent>=0.1.8",
+    "sagent>=0.1.20,<0.2",
     "starlette",
     "uvicorn",
     "mcp",
