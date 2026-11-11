@@ -69,10 +69,11 @@ class Profile:
 
     Attributes:
         name: Human label for the deployment (``[team].name``).
-        session_id_namespace: String fed into the per-role uuid5 derivation
-            (``[team].session_id_namespace``). Changing it per deployment keeps
-            two deployments on the same machine/cwd from colliding on session
-            files.
+        session_id_namespace: Deployment label (``[team].session_id_namespace``),
+            logged at boot. It once namespaced the per-role claude session ids;
+            on sagent >=0.2 each role's session is its journal under
+            ``SAGENT_DATA_DIR``, so two deployments are kept apart by their
+            data dirs.
         workspace_root: Resolved absolute path to the project/monorepo root.
         workspace_repos: Sub-repo names for a monorepo; empty for a single
             project. Listed in the rendered ``{{workspace}}`` block when present.

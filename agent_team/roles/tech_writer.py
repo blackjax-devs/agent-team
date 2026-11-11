@@ -30,29 +30,36 @@ if TYPE_CHECKING:
 _ROLE = "tech-writer"
 
 
-def build(profile: "Profile"):
+def build(profile: "Profile", **agent_kwargs):
     """Construct the Tech-Writer Agent.
 
     Model + system prompt come from the loaded profile.
     """
     from ..team_profile import render_prompt
 
-    from sagent import tools
+    from sagent.tools.bash import Bash
+    from sagent.tools.edit import Edit
+    from sagent.tools.glob_tool import Glob
+    from sagent.tools.grep import Grep
+    from sagent.tools.read import Read
+    from sagent.tools.web_fetch import WebFetch
+    from sagent.tools.web_search import WebSearch
+    from sagent.tools.write import Write
 
     return build_agent(
         role_name=_ROLE,
         system=render_prompt(profile, _ROLE),
         tools=[
-            tools.Read(),
-            tools.Grep(),
-            tools.Glob(),
-            tools.Edit(),
-            tools.Write(),
-            tools.Bash(),
-            tools.WebSearch(),
-            tools.WebFetch(),
+            Read(),
+            Grep(),
+            Glob(),
+            Edit(),
+            Write(),
+            Bash(),
+            WebSearch(),
+            WebFetch(),
         ],
         model_id=profile.models.get(_ROLE, MODEL_HAIKU),
-        session_namespace=profile.session_id_namespace,
         peers=profile.roster,
+        **agent_kwargs,
     )

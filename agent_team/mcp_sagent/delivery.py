@@ -12,12 +12,10 @@
 # limitations under the License.
 """Peer-message delivery + audit-log writes for agent-team.
 
-The MCP server runs as a subprocess of ``claude --print``, which is a
-subprocess of ``serve.py``. They are three separate Python processes,
-so ``serve.py``'s in-process ``agent_registry`` is INVISIBLE to the
-MCP server (its own module instance has an empty registry). Direct
-delivery via ``target.runtime.inbox.push_back`` is therefore not an
-option from the MCP server's perspective.
+The MCP server runs as a subprocess of ``serve.py``: a separate Python
+process, so the live agents ``serve.py`` holds are INVISIBLE to it.
+Direct delivery via ``target.runtime.push`` is therefore not an option
+from the MCP server's perspective.
 
 We bridge the gap with HTTP: the MCP server POSTs to ``serve.py``'s
 loopback endpoints (``/api/post`` and ``/api/defer``) which DO have

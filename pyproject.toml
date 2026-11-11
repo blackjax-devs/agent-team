@@ -6,10 +6,10 @@ requires-python = ">=3.12"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 dependencies = [
-    "sagent>=0.1.20,<0.2",
+    "sagent>=0.2.3",
     "starlette",
     "uvicorn",
-    "mcp",
+    "mcp>=2.3",
     "pyyaml",
 ]
 
@@ -21,8 +21,7 @@ worklog-index = "agent_team.worklog.tools.build_index:main"
 worklog-tags = "agent_team.worklog.tools.normalize_tags:main"
 
 [dependency-groups]
-# Test deps for the vendored cli_session/ materializer suite (async canary
-# tests need pytest-asyncio). Run: `uv run --group dev pytest agent_team/`.
+# Test deps (the async tests need pytest-asyncio). Run: `uv run --group dev pytest`.
 dev = [
     "pytest",
     "pytest-asyncio",
@@ -48,7 +47,6 @@ agent_team = [
     "web/*.html",
     "profiles/**/*.toml",
     "profiles/**/*.md",
-    "cli_session/*.md",
 ]
 
 # Ship the worklog template files so they can be inspected after install.

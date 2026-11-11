@@ -12,11 +12,12 @@
 # limitations under the License.
 """MCP stdio server for agent-team peer messaging.
 
-This module is the entry point that each agent's ``claude --print``
-subprocess spawns via its ``--mcp-config``. The CLI talks to it over
-stdio using the standard MCP protocol; on every ``CallToolRequest``,
-our handler dispatches into the in-process :mod:`delivery` module
-which talks to sagent's :data:`agent_registry` directly.
+This module is the entry point ``serve.py`` spawns once per agent, through
+sagent's ``McpSession`` (see :func:`agent_team.roles.common.chat_session`).
+sagent talks to it over stdio using the standard MCP protocol and offers
+its tools to the agent's model; on every ``CallToolRequest``,
+our handler dispatches into the in-process :mod:`delivery` module,
+which POSTs to ``serve.py``'s loopback API (the live agents are there).
 
 Three tools are exposed:
 
@@ -31,24 +32,23 @@ Three tools are exposed:
     ``AgentSelf`` but available via the same MCP namespace as the
     other plugin tools, so agents see one consistent interface.
 
-Each agent's CLI subprocess spawns its own instance of this server
-(stdio transport, one subprocess per ``claude --print``). The
-``SAGENT_ROLE`` env var — set by :mod:`runtime.build` when it writes
-the per-role MCP config — tells the server which agent it serves.
+Each agent gets its own instance of this server (stdio transport, one
+subprocess per agent). The ``SAGENT_ROLE`` env var — set by
+:func:`agent_team.roles.common._sagent_mcp_server_entry` — tells the
+server which agent it serves.
 That's how peer attribution works without per-call wire-format
 changes: each MCP server instance just knows its identity from the
 environment.
 
-The fully-qualified tool names the CLI sees are:
+The fully-qualified tool names the agent is offered are:
 
   - ``mcp__sagent_chat__sagent_send``
   - ``mcp__sagent_chat__sagent_defer``
   - ``mcp__sagent_chat__sagent_self``
 
 (MCP's namespacing convention: ``mcp__<server-name>__<tool-name>``;
-the ``<server-name>`` portion is whatever key the agent's mcp.json
-puts under ``mcpServers``. We use ``sagent`` — see
-:mod:`runtime.build`.)
+the ``<server-name>`` portion is the name the server is configured
+under — :data:`agent_team.roles.common.CHAT_SERVER_NAME`.)
 
 The probe (see README § "Episode 3") established that all three
 target models — haiku, sonnet, opus — emit structured ``tool_use``
@@ -71,7 +71,7 @@ import mcp.server.stdio
 import mcp.types as mcp_types
 
 
-# Launched as a subprocess via ``--mcp-config`` as
+# Launched as a subprocess as
 # ``python -m agent_team.mcp_sagent.server`` (see
 # :func:`agent_team.roles.common._sagent_mcp_server_entry`), so the package
 # context is established and ``delivery`` resolves as an ordinary
@@ -107,10 +107,10 @@ def _debug(msg: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# Server identity (from env, set by runtime.build when launching the CLI)
+# Server identity (from env, set when serve.py launches this server)
 # --------------------------------------------------------------------------
 
-# Each agent's CLI gets its own MCP server subprocess; SAGENT_ROLE is
+# Each agent gets its own MCP server subprocess; SAGENT_ROLE is
 # set in the env of that subprocess. The server reads it once at
 # startup. If absent we default to ``operator`` so a manual invocation
 # of this module still functions (useful for the standalone probe).
@@ -121,9 +121,8 @@ _AGENT_ROLE = os.environ.get("SAGENT_ROLE", "operator")
 # before pushing the warmup probe and removes it once warmup
 # completes. File-based (vs env-var) because env vars can't be
 # flipped on a running subprocess — and our MCP server IS a
-# subprocess of ``claude --print``, which is itself a subprocess of
-# ``serve.py``. Filesystem visibility is the only synchronisation
-# mechanism that all three layers share.
+# subprocess of ``serve.py``. Filesystem visibility is the
+# synchronisation mechanism the two share.
 _SUPPRESS_FLAG = delivery.SESSIONS_DIR / "_suppress_audit"
 
 
@@ -135,11 +134,7 @@ def _suppress_audit() -> bool:
 # Tool catalog
 # --------------------------------------------------------------------------
 
-server = mcp.server.Server("sagent_chat")
-
-
-@server.list_tools()
-async def list_tools() -> list[mcp_types.Tool]:
+def list_tools() -> list[mcp_types.Tool]:
     return [
         mcp_types.Tool(
             name="sagent_send",
@@ -154,7 +149,7 @@ async def list_tools() -> list[mcp_types.Tool]:
                 "NOT preempt — so to redirect a peer, just send normally and "
                 "they'll act on it next turn.)"
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "to": {
@@ -194,7 +189,7 @@ async def list_tools() -> list[mcp_types.Tool]:
                 "use 'bash sleep' for waiting — that blocks your turn for "
                 "the entire duration and makes you uninterruptible."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "delay_s": {
@@ -224,7 +219,7 @@ async def list_tools() -> list[mcp_types.Tool]:
                 "trigger a structured compaction, or context='recompact' to "
                 "recompact existing history."
             ),
-            inputSchema={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "status": {
@@ -250,20 +245,23 @@ async def list_tools() -> list[mcp_types.Tool]:
 # --------------------------------------------------------------------------
 
 
-def _text(s: str, is_error: bool = False) -> list[mcp_types.ContentBlock]:
-    """Convenience wrapper — MCP wants a list of content blocks."""
-    return [mcp_types.TextContent(type="text", text=s)]
+def _text(s: str, is_error: bool = False) -> mcp_types.CallToolResult:
+    """Convenience wrapper — MCP wants a list of content blocks.
+
+    A failure is reported inside the result (``is_error``), not as a protocol
+    error, so the model sees it and can self-correct.
+    """
+    return mcp_types.CallToolResult(
+        content=[mcp_types.TextContent(type="text", text=s)],
+        is_error=is_error,
+    )
 
 
-@server.call_tool()
-async def call_tool(
-    name: str, arguments: dict[str, Any]
-) -> list[mcp_types.ContentBlock]:
+async def call_tool(name: str, arguments: dict[str, Any]) -> mcp_types.CallToolResult:
     # Each call resolves the sender identity from the module-level
     # constant (set from env at startup). This means a single MCP
-    # server instance serves a single agent — the sagent.serve.py
-    # process launches one CLI per agent and each CLI spawns its
-    # own MCP server with its own SAGENT_ROLE.
+    # server instance serves a single agent — ``serve.py`` launches
+    # one MCP server per agent, each with its own SAGENT_ROLE.
     sender = _AGENT_ROLE
     suppress = _suppress_audit()
     _debug(f"call_tool name={name!r} arguments={arguments!r} suppress={suppress}")
@@ -284,14 +282,6 @@ async def call_tool(
             suppress_audit=suppress,
         )
         _debug(f"  route_send -> ok={ok} status={status!r}")
-        # Also report the registry contents to surface the
-        # cross-process registry issue if we hit it.
-        try:
-            from sagent.tools.core import agent_registry
-
-            _debug(f"  agent_registry keys: {sorted(agent_registry)}")
-        except Exception as e:
-            _debug(f"  agent_registry import failed: {e!r}")
         return _text(status, is_error=not ok)
 
     if name == "sagent_defer":
@@ -311,11 +301,9 @@ async def call_tool(
         return _text(status, is_error=not ok)
 
     if name == "sagent_self":
-        # NB: this MCP server runs as a SEPARATE Python process spawned
-        # by claude --print's --mcp-config — its ``agent_registry``
-        # is a fresh, empty module-level dict, distinct from the live
-        # registry that ``serve.py`` owns. So we can't reach the live
-        # runtime from here to set ``runtime.status`` directly.
+        # NB: this MCP server runs as a SEPARATE Python process from
+        # ``serve.py``, which owns the live agents. So we can't reach
+        # the live runtime from here to set its status directly.
         #
         # For warmup the round-trip just needs to ack so the model
         # ends the turn (the bootstrap directive requires a single
@@ -340,6 +328,28 @@ async def call_tool(
     return _text(f"[Error] unknown tool: {name!r}", is_error=True)
 
 
+async def _on_list_tools(
+    _ctx: mcp.server.ServerRequestContext,
+    _params: mcp_types.PaginatedRequestParams | None,
+) -> mcp_types.ListToolsResult:
+    return mcp_types.ListToolsResult(tools=list_tools())
+
+
+async def _on_call_tool(
+    _ctx: mcp.server.ServerRequestContext,
+    params: mcp_types.CallToolRequestParams,
+) -> mcp_types.CallToolResult:
+    return await call_tool(params.name, params.arguments or {})
+
+
+server = mcp.server.Server(
+    "sagent_chat",
+    version="0.1.0",
+    on_list_tools=_on_list_tools,
+    on_call_tool=_on_call_tool,
+)
+
+
 # --------------------------------------------------------------------------
 # Entrypoint
 # --------------------------------------------------------------------------
@@ -352,18 +362,7 @@ async def _amain() -> None:
     )
     _LOG.info("mcp_sagent server starting for role=%s", _AGENT_ROLE)
     async with mcp.server.stdio.stdio_server() as (read, write):
-        await server.run(
-            read,
-            write,
-            mcp.server.InitializationOptions(
-                server_name="sagent_chat",
-                server_version="0.1.0",
-                capabilities=server.get_capabilities(
-                    notification_options=mcp.server.NotificationOptions(),
-                    experimental_capabilities={},
-                ),
-            ),
-        )
+        await server.run(read, write, server.create_initialization_options())
 
 
 def main() -> None:

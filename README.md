@@ -27,8 +27,8 @@ Both share the same roles, methodology, and workspace config; only the runtime d
 
 ## Quickstart (channel) — provisional
 
-**No clone — one line** (runs the server straight from GitHub; sagent comes along
-via the direct-URL dep, no extra flags):
+**No clone — one line** (runs the server straight from GitHub; sagent ≥ 0.2
+comes along from PyPI, no extra flags):
 ```bash
 uvx --from git+https://github.com/blackjax-devs/agent-team.git agent-team serve --port 8767
 # UI at http://127.0.0.1:8767/
@@ -60,7 +60,7 @@ launch cwd by default; set `SAGENT_DATA_DIR` to relocate it.
 ## Stopping the server
 
 `serve` shuts down **gracefully on `SIGINT`/`SIGTERM`**: the HTTP server stops
-first, then each agent's runtime drains and **persists its tape**, so no work is
+first, then each agent closes and **persists its session**, so no work is
 lost and the next launch resumes cleanly. Prefer this over a hard kill.
 
 ```bash
@@ -84,23 +84,26 @@ hard-kills the process and skips the graceful drain.
 
 ## Restart, recovery & large tapes
 
-The channel persists each agent's full conversation (its sagent *tape*) to
+The channel persists each agent's full conversation (its sagent session
+journal — the *tape* below) to
 `SAGENT_DATA_DIR/sessions/<role>.sagent/session.jsonl`, so stopping and
-relaunching `serve` resumes every agent where it left off.
+relaunching `serve` resumes every agent where it left off. A journal written
+by a pre-0.2 sagent is upgraded in place on the first boot; the original is
+kept beside it as `session.legacy.jsonl`.
 
 > **After any restart, give the team a few minutes to settle — don't touch
 > anything in the meanwhile.** On boot each agent re-feeds its resumed tape to
-> the `claude` CLI and re-establishes its MCP bridge — a warmup that can run for
+> a fresh `claude` CLI and proves its peer-messaging tools — a warmup that can run for
 > up to ~90s, after which agents recover on their first real turn (≈2–3 min
 > total). **Don't send work or trigger another restart/slim during this
 > window**: acting on a still-settling agent can crash its compaction and wedge
 > it.
 
-**Resume-slim** (the `slim` mode — materialize's fallback). The resumed tape is
+**Resume-slim** (the `slim` mode — the default). The resumed tape is
 trimmed to roughly its last `AGENT_TEAM_RESUME_KEEP` messages (default `120`),
 snapped to a clean turn boundary, *before* it is re-fed to the CLI. This bounds
 the first-turn re-feed so a large tape (a long-running coordinator can reach
-megabytes) can't stall the MCP handshake on boot. It is deterministic (no model
+megabytes) can't stall the first turn after boot. It is deterministic (no model
 call), the on-disk history is never rewritten, and small tapes are left
 untouched. Set `AGENT_TEAM_RESUME_KEEP=0` to disable (resume the full tape), or
 raise it to keep more context. **A server restart is therefore the reliable
@@ -115,18 +118,17 @@ count = less wall-clock), so peers resume holding work the lead has forgotten �
 they desync. Idle agents (no activity since the floor) keep only a last-turn
 breadcrumb, not a stale window.
 
-**Resume mode (`AGENT_TEAM_RESUME_MODE`, default `materialize`).** Three modes:
-- **`materialize`** (default) — instead of re-feeding the tape, write claude's
-  session JSONL *directly* from the resumed context and resume it with a native
-  `--resume`. There is no re-feed at all, so startup is effectively instant and
-  each agent continues exactly mid-thread. It couples to claude's session-file
-  format, so it is gated by a boot **drift-canary** (a throwaway `claude`
-  round-trip diffed against the materializer's output); on drift — or if
-  `claude` isn't available at boot — it falls back to `slim`.
-- **`slim`** — the trimming described above: the deterministic fallback the
-  canary degrades to, and selectable directly.
+**Resume mode (`AGENT_TEAM_RESUME_MODE`, default `slim`).** Two modes:
+- **`slim`** (default) — the trimming described above.
 - **`full`** — resume the untrimmed tape (no slimming): the original fat-tape
   re-feed behaviour, kept as an escape hatch.
+
+> `materialize` (the default before agent-team moved to sagent 0.2) is gone. It
+> wrote claude's own session file and resumed it with a native `--resume`;
+> sagent 0.2 runs `claude --no-session-persistence` and tells a fresh `claude`
+> the conversation itself, so there is no session file to resume. Setting
+> `AGENT_TEAM_RESUME_MODE=materialize` logs a warning and selects `slim`, which
+> was its fallback.
 
 **Per-agent restart (debug console).** The console at `/debug` exposes three
 intensities per agent (also `POST /api/restart {role, mode}`, loopback-only):
@@ -145,12 +147,12 @@ intensities per agent (also `POST /api/restart {role, mode}`, loopback-only):
 > `reanchor`.
 
 Related env knobs:
-- `AGENT_TEAM_RESUME_MODE` (default `materialize`) — `materialize` (native `--resume`, canary-gated, effectively-instant startup) | `slim` (fallback) | `full`.
-- `AGENT_TEAM_RESUME_KEEP` (default `120`) — messages kept per tape on resume (slim mode/fallback); `0` resumes the full tape.
+- `AGENT_TEAM_RESUME_MODE` (default `slim`) — `slim` | `full`.
+- `AGENT_TEAM_RESUME_KEEP` (default `120`) — messages kept per tape on resume (slim mode); `0` resumes the full tape.
 - `AGENT_TEAM_RESUME_LEAD` (default `tl`) — the role whose slim cut anchors every other agent's wall-clock floor (slim mode); empty/absent disables cross-agent anchoring.
 - `AGENT_TEAM_SLIM_MAX_MESSAGES` (default `250`) — max resolved-context size at which a live `slim` is allowed; above it the server refuses and points at a restart.
-- `AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC` (default `25`) — seconds boot waits for the CLI's MCP bridge before respawning.
-- `AGENT_TEAM_COMPACT_TRIGGER` (default `0.80`) — context-utilization fraction at which an agent auto-compacts mid-run.
+- `AGENT_TEAM_MCP_CONNECT_TIMEOUT_SEC` (default `25`) — seconds boot waits for each agent's peer-messaging MCP server to connect; boot fails if one does not.
+- `AGENT_TEAM_COMPACT_TRIGGER` (default `0.80`) — fraction of the context window at which an agent auto-compacts mid-run.
 
 ## Profiles
 Behavior is driven by a **profile dir** (`AGENT_TEAM_PROFILE_DIR`): a

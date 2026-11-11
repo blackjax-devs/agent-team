@@ -2,22 +2,22 @@ name: CI
 
 # Triggers: every push/PR to main, plus a nightly schedule.
 #
-# agent-team targets the sagent 0.1.x API (`sagent>=0.1.20,<0.2` in
-# pyproject.toml). sagent 0.2.0 reorganised the package (sagent.types.* split
-# into sagent.model / sagent.runtime / sagent.session, sagent.tools.core and
-# sagent.testing removed) and replaced AnthropicCLI.model() — which
-# roles/common.py calls with extra_mcp_servers / session_id /
-# subprocess_read_timeout_sec — so the upper bound stays until agent-team is
-# ported. The bound is load-bearing HERE: the test step below runs under `uvx`,
-# which re-resolves from pyproject.toml and ignores uv.lock.
+# agent-team is built on sagent >=0.2 (`sagent>=0.2.3` in pyproject.toml) and
+# tests against the versions uv.lock pins: every step below runs in the synced
+# project environment (`uv run`), so a new sagent release cannot change what CI
+# tests until the lock is refreshed. (It used to run the suite under `uvx`,
+# which re-resolves from pyproject.toml and ignores the lock — that is how the
+# sagent 0.2.0 release turned a green main red overnight.)
 #
-# The separate nightly-sagent-head.yml resolves sagent @main and reports the
-# drift; it is expected red until the 0.2 port lands.
+# The separate nightly-sagent-head.yml resolves sagent @main instead, to warn
+# us of upstream drift before it reaches a release.
 #
-# Note the PROVIDER-SIGNATURE smoke below: the import smoke alone never calls
-# provider.model(), so it can't see a model() signature change — the signature
-# smoke (inspect AnthropicCLI.model) is what catches a dropped kwarg. The mock test
-# in tests/ covers the other half: that common.py still PASSES those kwargs.
+# Note the SAGENT-SEAMS smoke below: importing agent_team proves little, since
+# most of what it passes to sagent is only reached once a team boots. The seams
+# test (tests/sagent_seams_test.py) names each sagent class, argument and field
+# agent-team relies on, so a rename upstream fails with the seam named. The
+# rest of tests/ covers the other half: that agent-team still PASSES them, and
+# that a team boots and messages end to end on a scripted model.
 
 on:
   push:
@@ -46,11 +46,11 @@ jobs:
       - name: Sync dependencies
         run: uv sync
 
-      # pytest is not a project dependency, so bring it in just for the run.
-      # pytest-asyncio: the vendored cli_session tripwire suite has async tests
-      # (asyncio_mode=auto in pyproject); without it they run as silent no-ops.
+      # pytest + pytest-asyncio come from the `dev` dependency group, at their
+      # locked versions (asyncio_mode=auto in pyproject; without pytest-asyncio
+      # the async tests would run as silent no-ops).
       - name: Run test suite
-        run: uvx --with-editable . --with pytest --with pytest-asyncio pytest -q
+        run: uv run --group dev pytest -q
 
       # Framework import smoke: package import + bundled-default profile load
       # (no AGENT_TEAM_PROFILE_DIR — exercises the in-package default that
@@ -61,15 +61,15 @@ jobs:
           cd "$RUNNER_TEMP"
           uv run --project "$GITHUB_WORKSPACE" python -c "import agent_team; from agent_team.team_profile import load_profile; load_profile(); from agent_team.serve import main; assert callable(main)"
 
-      # Provider-signature smoke: assert sagent's AnthropicCLI.model() still
-      # accepts the kwargs roles/common.py passes. A full _build_all_agents()
-      # would need claude credentials (AnthropicCLI.from_credentials()), which CI
-      # lacks — but the drift that bit us is a model() SIGNATURE change, and this
-      # catches that headlessly. (sagent 0.2, which has no AnthropicCLI.model(),
-      # fails here; the import smoke above never reaches provider.model().)
-      - name: Provider signature smoke
-        run: |
-          uv run python -c "import inspect; from sagent.providers import AnthropicCLI; have=set(inspect.signature(AnthropicCLI.model).parameters); need={'extra_mcp_servers','session_id','subprocess_read_timeout_sec'}; miss=need-have; assert not miss, f'sagent AnthropicCLI.model() dropped kwargs agent-team passes: {sorted(miss)}'; print('provider model() signature OK:', sorted(need))"
+      # sagent-seams smoke: assert sagent still offers every class, argument
+      # and field agent-team passes it (Agent(...), AnthropicCLI()[model],
+      # McpSession/McpServer, SummaryCompactor(summary_tokens=), JsonlJournal,
+      # the runtime messages serve.py pushes). A full boot would need claude
+      # credentials, which CI lacks — this catches API drift headlessly, and
+      # names the seam. (Part of the suite above too; kept as its own step so
+      # a drift failure is visible at a glance.)
+      - name: sagent seams smoke
+        run: uv run --group dev pytest tests/sagent_seams_test.py -q
 
       # Console-script smoke: --help must print usage and exit 0 without booting.
       - name: Console script --help

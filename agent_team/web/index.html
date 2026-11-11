@@ -1309,12 +1309,17 @@ function makeExpander(row, label, fullText) {
 // {_event, _ts, _n, ...fields}. Renderer matches the one in debug.html
 // so opening a trace here looks the same as scrubbing through it on
 // /debug → Search → Open in trace.
+// A peer's inbound message: sagent >=0.2 names the event AgentToAgentMessage;
+// traces written by sagent 0.1 hold AgentSendMessage.
+function isPeerMessage(kind) {
+  return kind === 'AgentToAgentMessage' || kind === 'AgentSendMessage';
+}
 function renderTraceEvent(ev) {
   const ts = (ev._ts || '').slice(11, 19);
   const kind = ev._event || '?';
 
-  if (kind === 'UserMessage' || kind === 'AgentSendMessage') {
-    const src = kind === 'AgentSendMessage' ? (ev.source || '?') : 'user';
+  if (kind === 'UserMessage' || isPeerMessage(kind)) {
+    const src = isPeerMessage(kind) ? (ev.source || '?') : 'user';
     const body = (ev.text || '').split('\n').find(l => l.trim()) || '';
     const row = document.createElement('div');
     row.className = 'ev';

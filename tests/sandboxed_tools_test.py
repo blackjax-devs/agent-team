@@ -29,12 +29,12 @@ import os
 import pytest
 
 from agent_team import sandboxed_tools
-from sagent.testing import with_fake_agent
+from sagent.tools.types import ToolContext
 
 
-def _run(coro):
-    """Sync wrapper used by tests to drive an async tool call."""
-    return asyncio.run(coro)
+def _run(tool, arguments, context: ToolContext | None = None):
+    """Drive one tool call with a fresh agent's ``ToolContext``."""
+    return asyncio.run(tool.call(context or ToolContext(), arguments))
 
 
 def test_sandboxed_write_rejects_absolute_path_outside_sandbox(tmp_path: Path) -> None:
@@ -42,10 +42,9 @@ def test_sandboxed_write_rejects_absolute_path_outside_sandbox(tmp_path: Path) -
     sandbox.mkdir()
     outside = tmp_path / "outside.txt"
     tool = sandboxed_tools.SandboxedWrite(sandbox_root=sandbox)
-    with with_fake_agent():
-        result = _run(tool.run({"file_path": str(outside), "content": "hi"}))
+    result = _run(tool, {"file_path": str(outside), "content": "hi"})
     assert result.is_error
-    assert "outside the statistician sandbox" in result.content
+    assert "outside the statistician sandbox" in result.text()
     assert not outside.exists()
 
 
@@ -54,10 +53,26 @@ def test_sandboxed_write_accepts_path_inside_sandbox(tmp_path: Path) -> None:
     sandbox.mkdir()
     target = sandbox / "experiment.py"
     tool = sandboxed_tools.SandboxedWrite(sandbox_root=sandbox)
-    with with_fake_agent():
-        result = _run(tool.run({"file_path": str(target), "content": "print('ok')\n"}))
-    assert not result.is_error, f"unexpected error: {result.content}"
+    result = _run(tool, {"file_path": str(target), "content": "print('ok')\n"})
+    assert not result.is_error, f"unexpected error: {result.text()}"
     assert target.read_text() == "print('ok')\n"
+
+
+def test_sandboxed_write_resolves_relative_path_from_agent_cwd(tmp_path: Path) -> None:
+    """A relative ``file_path`` is judged from the calling agent's cwd."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    tool = sandboxed_tools.SandboxedWrite(sandbox_root=sandbox)
+    inside = _run(
+        tool, {"file_path": "a.py", "content": "x\n"}, ToolContext(cwd=sandbox)
+    )
+    assert not inside.is_error, inside.text()
+    assert (sandbox / "a.py").read_text() == "x\n"
+    outside = _run(
+        tool, {"file_path": "a.py", "content": "x\n"}, ToolContext(cwd=tmp_path)
+    )
+    assert outside.is_error
+    assert not (tmp_path / "a.py").exists()
 
 
 def test_sandboxed_write_blocks_dot_dot_traversal(tmp_path: Path) -> None:
@@ -67,12 +82,10 @@ def test_sandboxed_write_blocks_dot_dot_traversal(tmp_path: Path) -> None:
     nested.mkdir(parents=True)
     escape_target = tmp_path / "pwned.txt"
     tool = sandboxed_tools.SandboxedWrite(sandbox_root=sandbox)
-    with with_fake_agent():
-        result = _run(
-            tool.run(
-                {"file_path": str(nested / ".." / ".." / "pwned.txt"), "content": "x"}
-            )
-        )
+    result = _run(
+        tool,
+        {"file_path": str(nested / ".." / ".." / "pwned.txt"), "content": "x"},
+    )
     assert result.is_error
     assert not escape_target.exists()
 
@@ -87,8 +100,7 @@ def test_sandboxed_write_blocks_symlink_escape(tmp_path: Path) -> None:
     os.symlink(outside_target, link_inside)
 
     tool = sandboxed_tools.SandboxedWrite(sandbox_root=sandbox)
-    with with_fake_agent():
-        result = _run(tool.run({"file_path": str(link_inside), "content": "PWNED\n"}))
+    result = _run(tool, {"file_path": str(link_inside), "content": "PWNED\n"})
     assert result.is_error
     # outside_target must be untouched:
     assert outside_target.read_text() == "original\n"
@@ -96,10 +108,9 @@ def test_sandboxed_write_blocks_symlink_escape(tmp_path: Path) -> None:
 
 def test_sandboxed_write_rejects_missing_file_path() -> None:
     tool = sandboxed_tools.SandboxedWrite(sandbox_root=Path("/tmp"))
-    with with_fake_agent():
-        result = _run(tool.run({"content": "hi"}))
+    result = _run(tool, {"content": "hi"})
     assert result.is_error
-    assert "'file_path' is required" in result.content
+    assert "'file_path' is required" in result.text()
 
 
 def test_sandboxed_edit_accepts_in_sandbox_target(tmp_path: Path) -> None:
@@ -108,24 +119,15 @@ def test_sandboxed_edit_accepts_in_sandbox_target(tmp_path: Path) -> None:
     target = sandbox / "f.py"
     target.write_text("x = 1\ny = 2\n")
     tool = sandboxed_tools.SandboxedEdit(sandbox_root=sandbox)
-    # Ensure the read-cache lookup the Edit tool performs starts clean.
-    # The FakeAgent fresh per-test gets its own ToolState.
-    with with_fake_agent() as agent:
-        # mark_read so the Edit tool's read-before-write check passes
-        from sagent.tools.core import mark_read
-
-        mark_read(str(target), content=target.read_text())
-        result = _run(
-            tool.run(
-                {
-                    "file_path": str(target),
-                    "old_string": "x = 1",
-                    "new_string": "x = 42",
-                }
-            )
-        )
-        del agent  # silence unused
-    assert not result.is_error, f"unexpected error: {result.content}"
+    # Record the file as read, so Edit's read-before-write check passes.
+    context = ToolContext()
+    context.files.saw(target)
+    result = _run(
+        tool,
+        {"file_path": str(target), "old_string": "x = 1", "new_string": "x = 42"},
+        context,
+    )
+    assert not result.is_error, f"unexpected error: {result.text()}"
     assert target.read_text() == "x = 42\ny = 2\n"
 
 
@@ -135,19 +137,30 @@ def test_sandboxed_edit_rejects_out_of_sandbox(tmp_path: Path) -> None:
     outside = tmp_path / "production.py"
     outside.write_text("DANGER = True\n")
     tool = sandboxed_tools.SandboxedEdit(sandbox_root=sandbox)
-    with with_fake_agent():
-        result = _run(
-            tool.run(
-                {
-                    "file_path": str(outside),
-                    "old_string": "DANGER = True",
-                    "new_string": "DANGER = False",
-                }
-            )
-        )
+    context = ToolContext()
+    context.files.saw(outside)
+    result = _run(
+        tool,
+        {
+            "file_path": str(outside),
+            "old_string": "DANGER = True",
+            "new_string": "DANGER = False",
+        },
+        context,
+    )
     assert result.is_error
+    assert "outside the statistician sandbox" in result.text()
     # File contents unchanged:
     assert outside.read_text() == "DANGER = True\n"
+
+
+def test_sandboxed_tools_keep_the_underlying_tool_identity(tmp_path: Path) -> None:
+    """The model must see an ordinary ``Write`` / ``Edit``."""
+    write = sandboxed_tools.SandboxedWrite(sandbox_root=tmp_path)
+    edit = sandboxed_tools.SandboxedEdit(sandbox_root=tmp_path)
+    assert (write.name, edit.name) == ("Write", "Edit")
+    assert "file_path" in write.schema["properties"]
+    assert "old_string" in edit.schema["properties"]
 
 
 def test_sandbox_root_must_be_absolute() -> None:

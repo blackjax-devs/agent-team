@@ -20,27 +20,25 @@ Launch via the installed console script (works from any cwd):
 What this does
 --------------
 
-1. Constructs the 5 role agents via the per-role ``build()`` factories.
-   Each agent's CLI subprocess is launched with ``--mcp-config`` that
-   includes the plugin's MCP server (``mcp_sagent/server.py``) with
-   ``SAGENT_ROLE=<label>`` in its env — so peer messaging, self-defer,
-   and status-report all flow through ``mcp__sagent_chat__*`` tool calls
-   instead of sagent's bridge-mounted ``AgentSend``/``AgentSelf``.
-2. Marks each agent ``_persistent=True`` and registers each in
-   ``sagent.tools.core.agent_registry`` keyed by role label.
-3. Adds ``user`` + ``system`` FakeAgents so peer messages addressed to
-   them satisfy the "unknown agent" validation. The web UI is the
-   user-visible surface for ``user``-targeted messages (read from
-   ``main.jsonl``).
-4. Starts ``serve_forever()`` for each agent as a background task.
-5. Touches the ``_suppress_audit`` sentinel, fires the bootstrap probe
-   (one MCP-bridge warm-up turn per agent), waits for AgentIdle, then
-   removes the sentinel — so the warmup turn writes zero audit log
-   records and pushes zero peer messages.
-6. Starts a Starlette+uvicorn HTTP server on the configured host:port.
+1. Connects one peer-messaging MCP server (``mcp_sagent/server.py``) per
+   role, with ``SAGENT_ROLE=<label>`` in its env, through sagent's
+   ``McpSession`` — so peer messaging, self-defer, and status-report all flow
+   through ``mcp__sagent_chat__*`` tool calls instead of sagent's own
+   ``AgentSend``/``AgentSelf``.
+2. Constructs the roster's role agents via the per-role ``build()``
+   factories, each on its session journal, and opens them: an agent with a
+   prior session resumes it (see ``AGENT_TEAM_RESUME_MODE``).
+3. Keeps the agents by role label; ``user`` + ``system`` are addressable
+   mailboxes without an agent. The web UI is the user-visible surface for
+   ``user``-targeted messages (read from ``main.jsonl``).
+4. Touches the ``_suppress_audit`` sentinel, fires the bootstrap probe
+   (one warm-up turn per agent), waits for AgentIdle, then removes the
+   sentinel — so the warmup turn writes zero audit log records and pushes
+   zero peer messages.
+5. Starts a Starlette+uvicorn HTTP server on the configured host:port.
 
 Shutdown via SIGTERM or Ctrl-C: the HTTP server stops first, then
-each agent's runtime drains gracefully.
+each agent closes, writing its session.
 """
 
 from __future__ import annotations
@@ -49,12 +47,13 @@ from collections.abc import Sequence
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import logging
 import os
 import signal
-import subprocess
 import sys
+import time
 
 
 # Pulls in the data-dir resolution (env-configurable). All file paths
@@ -63,9 +62,9 @@ import sys
 # trace files, per-role mcp.json, sentinel, and debug log — useful
 # for end-of-day merges that union this plugin's main.jsonl with the
 # sibling chat/ runtime's main.jsonl in one directory.
-from datetime import UTC
+from contextlib import AsyncExitStack
+from datetime import UTC, datetime
 from importlib.resources import files as _pkg_files
-from pathlib import Path
 from typing import Any
 
 from .mcp_sagent import delivery
@@ -80,35 +79,50 @@ _MAIN_JSONL = delivery.MAIN_JSONL_PATH
 # window. Path must match :data:`mcp_sagent.server._SUPPRESS_FLAG`.
 _SUPPRESS_FLAG = delivery.SESSIONS_DIR / "_suppress_audit"
 
-# Resume-slim: on every server restart, trim each agent's resumed tape to
-# ~the last N history events (snapped to a turn boundary) BEFORE handing it to
-# the provider. Deterministic (no model call), so a large tape can't blow the
-# MCP-catalog deadline on the first-turn re-feed — the fat-tape boot wedge that
-# took down TL (855 records / 1.97 MB) after a failed live compact. ON by
-# default; set to 0 to disable (resume the full tape), or raise to keep more
-# recent context. The on-disk JSONL is untouched — only the in-memory re-feed
-# is bounded, and every restart re-slims from the full physical history.
+# Resume-slim: on every server restart, trim each agent's resumed context to
+# ~the last N conversation records (snapped to a turn boundary) BEFORE the agent
+# reads it. Deterministic (no model call), so a large session can't stall the
+# first turn after a restart — the fat-tape boot wedge that took down TL
+# (855 records / 1.97 MB) after a failed live compact. ON by default; set to 0
+# to disable (resume the full window), or raise to keep more recent context.
+# The on-disk JSONL is untouched — only what the agent resumes with is bounded,
+# and every restart re-slims from the full physical history.
 _RESUME_KEEP_RECORDS = int(os.environ.get("AGENT_TEAM_RESUME_KEEP", "120"))
 
-# Resume strategy (AGENT_TEAM_RESUME_MODE): how an agent's persisted tape is
+# Resume strategy (AGENT_TEAM_RESUME_MODE): how an agent's persisted session is
 # brought back on a server restart.
-#   full        — resume the untrimmed tape; first turn re-feeds the whole
-#                 resolved history via `claude --session-id` (the original
-#                 fat-tape boot-wedge risk). Escape hatch.
-#   slim        — trim the tape to its recent tail (`_RESUME_KEEP_RECORDS`)
-#                 then resume; first turn re-feeds the trimmed tail.
-#                 Deterministic, no model call. Also the materialize fallback.
-#   materialize — write claude's session JSONL directly from the resumed
-#                 context (vendored cli_session materializer) and flip the
-#                 provider so turn-1 is a clean native `--resume` of that file
-#                 — NO re-feed, exact mid-thread continuation, effectively
-#                 instant startup. Gated by a boot drift-canary; falls back to
-#                 slim if the canary finds the claude session format has drifted
-#                 (or if `claude` is unavailable at boot). THE DEFAULT — proven
-#                 live (TL's 1.98 MB tape resumed clean, all agents warmed up
-#                 READY, 0 errors); set AGENT_TEAM_RESUME_MODE=slim to opt out.
-_VALID_RESUME_MODES = ("full", "slim", "materialize")
-_RESUME_MODE = os.environ.get("AGENT_TEAM_RESUME_MODE", "materialize").strip().lower()
+#   slim — trim the journal's last window to its recent tail
+#          (`_RESUME_KEEP_RECORDS`) then resume; the first turn re-feeds the
+#          trimmed tail. Deterministic, no model call. THE DEFAULT.
+#   full — resume the untrimmed window; the first turn re-feeds all of it.
+#          Escape hatch.
+# `materialize` (the default before the port to sagent 0.2) is gone: it wrote
+# claude's own session file and flipped the provider to a native `--resume`.
+# sagent 0.2 runs `claude --no-session-persistence` and never reads a claude
+# session, so there is nothing to materialize; the value now selects `slim`,
+# which was its fallback.
+_VALID_RESUME_MODES = ("full", "slim")
+
+
+def _resolve_resume_mode(raw: str) -> tuple[str, str]:
+    """Return the resume mode ``raw`` selects, and a warning (``""`` for none)."""
+    mode = raw.strip().lower()
+    if mode in _VALID_RESUME_MODES:
+        return mode, ""
+    if mode == "materialize":
+        return "slim", (
+            "AGENT_TEAM_RESUME_MODE=materialize is not available on sagent>=0.2 "
+            "(claude session files are no longer resumed); using 'slim'"
+        )
+    return "slim", (
+        f"AGENT_TEAM_RESUME_MODE={raw!r} invalid; using 'slim' "
+        f"(valid: {'|'.join(_VALID_RESUME_MODES)})"
+    )
+
+
+_RESUME_MODE, _RESUME_MODE_WARNING = _resolve_resume_mode(
+    os.environ.get("AGENT_TEAM_RESUME_MODE", "slim")
+)
 
 # Lead/coordinator role for TL-anchored slim (`slim` mode only): the lead is
 # slimmed by record count and every other agent is slimmed to the lead's
@@ -145,146 +159,162 @@ def _role_builders() -> dict:
     }
 
 
-def _build_all_agents(profile):
-    """Construct + return the roster's role agents, each persistent + registered.
+# Labels that are addressable but are not agents. ``user`` is a
+# mailbox-without-listener: ``sagent_send(to='user', …)`` lands in the audit
+# log, which the web UI shows. ``system`` is reserved for diagnostic probes /
+# future eventing.
+_MAILBOXES = ("user", "system")
 
-    Only the roles in ``profile.roster`` are instantiated (1..N). Each
-    agent's ``claude --print`` subprocess is wired via ``--mcp-config`` to
-    the plugin's MCP server with ``SAGENT_ROLE=<label>`` in the server's
-    env — the sagent_send/sagent_defer/sagent_self tools appear in the
-    catalog as ``mcp__sagent_chat__*`` and are the only path for peer
-    messaging. A single-role roster boots fine: there are simply no peers
-    to address (only ``user``).
+
+def _now_iso() -> str:
+    """The time now, local with its UTC offset — how sagent stamps its records."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _is_inbound(record) -> bool:
+    """Whether ``record`` is a user-role message: a clean turn boundary."""
+    from sagent.session.types import AgentToAgentMessage, UserMessage
+
+    return isinstance(record, (UserMessage, AgentToAgentMessage))
+
+
+def _is_conversation(record) -> bool:
+    """Whether ``record`` is part of what the model sees (so a slim may drop it).
+
+    A window also holds bookkeeping the resume needs whole — the model and
+    system prompt in force (``UncategorizedRecord``) and what each turn cost
+    (``TokenUsage``) — which a slim always keeps.
     """
-    from .runtime import trace_writer
+    from sagent.session.types import ContextClear, TokenUsage, UncategorizedRecord
 
-    from sagent.testing import FakeAgent
-    from sagent.tools.core import agent_registry
-
-    builders = _role_builders()
-    agents = {}
-    for label in profile.roster:
-        builder = builders.get(label)
-        if builder is None:
-            raise ValueError(
-                f"roster references unknown role {label!r}; "
-                f"known roles: {sorted(builders)}"
-            )
-        agent = builder(profile)
-        agent._persistent = True
-        agent_registry[label] = agent
-        trace_writer.install_on(agent, label)
-        agents[label] = agent
-
-    # ``user`` is a mailbox-without-listener: ``sagent_send(to='user', …)``
-    # lands here. The FakeAgent's inbox accumulates undelivered notes
-    # harmlessly; the web UI shows them via the audit log.
-    agent_registry["user"] = FakeAgent()
-    # ``system`` is reserved for diagnostic probes / future eventing.
-    agent_registry["system"] = FakeAgent()
-
-    return agents
+    return not isinstance(record, (ContextClear, TokenUsage, UncategorizedRecord))
 
 
-async def _serve_agents_forever(agents):
-    """Spawn one ``serve_forever`` task per agent; return the gather handle."""
-    tasks = [
-        asyncio.create_task(agent.serve_forever(), name=f"serve-{label}")
-        for label, agent in agents.items()
-    ]
-    return tasks
+def _epoch(record) -> float | None:
+    """``record.timestamp`` (ISO 8601) as seconds since the epoch, if it has one."""
+    stamp = getattr(record, "timestamp", None)
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return datetime.fromisoformat(stamp).timestamp()
+    except ValueError:
+        return None
 
 
-def _slim_resume_tape(tape, keep):
-    """Trim a resumed tape to ~the last ``keep`` history events.
+def _inbound_times(body) -> dict[int, float]:
+    """Wall-clock time of each inbound message in ``body``, by index.
 
-    Drops ``ContextSplice`` compaction barriers (they mask refs by ordinal;
-    after a tail slice they'd reference dropped records) and keeps the last
-    ``keep`` ``ReferrableTapeEvent``s, snapped FORWARD to the first inbound
-    user-role message (``UserMessage`` or ``AgentSendMessage`` — both render as
-    user-role and are clean turn boundaries) so the slice starts cleanly — no
-    dangling ``tool_result`` whose ``tool_call`` was cut. ``replay_tape``
-    tolerates the non-contiguous tail (next ordinal = ``max(ordinal)+1``).
-
-    Deterministic, no model call — this is the whole point: a fat tape can't
-    wedge the MCP-catalog handshake on resume the way a live ``compact()`` can
-    (and did, on TL). Returns ``(slimmed, dropped)``; ``keep<=0`` disables.
+    A message sagent held back until the agent was free is journaled without a
+    timestamp of its own; it is dated by the first stamped record after it (the
+    ``TokenUsage`` of the reply it drew, seconds later).
     """
-    from sagent.types.runtime import AgentSendMessage, UserMessage
-    from sagent.types.tape import ContextSplice
+    times: dict[int, float] = {}
+    later: float | None = None
+    for i in range(len(body) - 1, -1, -1):
+        own = _epoch(body[i])
+        if own is not None:
+            later = own
+        if _is_inbound(body[i]) and later is not None:
+            times[i] = later
+    return times
 
-    # Small tape (or disabled): leave it completely untouched — no risk worth
+
+def _split_window(window):
+    """Split a journal window into its opening ``ContextClear`` and what follows.
+
+    The records a compaction kept (``ContextClear.history``) are part of the
+    conversation, so they lead the body. Returns ``(head, body)``; ``head`` is
+    ``None`` for a window that does not open with a ``ContextClear``.
+    """
+    from sagent.session.types import ContextClear
+
+    records = list(window)
+    if records and isinstance(records[0], ContextClear):
+        return records[0], [*records[0].history, *records[1:]]
+    return None, records
+
+
+def _cut_window(head, body, cut):
+    """Return the window that keeps ``body``'s conversation from index ``cut`` on.
+
+    The opening ``ContextClear`` is kept without the summary and history it
+    carried (both lie before the cut), and so is every bookkeeping record.
+    """
+    kept = [r for i, r in enumerate(body) if i >= cut or not _is_conversation(r)]
+    if head is None:
+        return kept
+    return [dataclasses.replace(head, summary=None, history=()), *kept]
+
+
+def _slim_resume_tape(window, keep):
+    """Trim a journal window to ~its last ``keep`` conversation records.
+
+    Keeps the last ``keep`` records the model sees, snapped FORWARD to the first
+    inbound user-role message (``UserMessage`` or ``AgentToAgentMessage`` — both
+    render as user-role and are clean turn boundaries) so the slice starts
+    cleanly — no dangling tool result whose call was cut. A compaction's summary
+    lies before any such cut and is dropped with what it summarized.
+
+    Deterministic, no model call — this is the whole point: a fat context can't
+    stall the first turn after a restart the way a live compaction can (and did,
+    on TL). Returns ``(slimmed, dropped)``; ``keep<=0`` disables.
+    """
+    head, body = _split_window(window)
+    spoken = [i for i, r in enumerate(body) if _is_conversation(r)]
+    # Small window (or disabled): leave it completely untouched — no risk worth
     # taking, and the re-feed is already cheap.
-    if keep <= 0 or len(tape) <= keep:
-        return tape, 0
-    events = [r for r in tape if not isinstance(r, ContextSplice)]
-    tail = events[-keep:] if len(events) > keep else events
-    for i, r in enumerate(tail):
-        if isinstance(getattr(r, "event", None), (UserMessage, AgentSendMessage)):
-            tail = tail[i:]
+    if keep <= 0 or len(spoken) <= keep:
+        return window, 0
+    cut = spoken[-keep]
+    for i in spoken[-keep:]:
+        if _is_inbound(body[i]):
+            cut = i
             break
-    return tail, len(tape) - len(tail)
+    return _cut_window(head, body, cut), sum(1 for i in spoken if i < cut)
 
 
 def _inbound_floor_ts(records):
-    """Earliest wall-clock timestamp among inbound (user-role) messages.
+    """Earliest wall-clock time among inbound (user-role) messages.
 
-    Inbound ``UserMessage`` / ``AgentSendMessage`` tape events each carry a
-    ``.timestamp`` (epoch float) — these are the cross-agent sync points. The
-    min over a slimmed lead tape is the lead's recent-window floor: the anchor
-    every other agent is trimmed to. Returns ``None`` when there is no
-    timestamped inbound message (caller falls back to per-agent slim).
+    Inbound messages are the cross-agent sync points. The min over a slimmed
+    lead window is the lead's recent-window floor: the anchor every other agent
+    is trimmed to. Returns ``None`` when no inbound message can be dated
+    (caller falls back to per-agent slim).
     """
-    from sagent.types.runtime import AgentSendMessage, UserMessage
-
-    floors = []
-    for r in records:
-        ev = getattr(r, "event", None)
-        if isinstance(ev, (UserMessage, AgentSendMessage)):
-            t = getattr(ev, "timestamp", None)
-            if isinstance(t, (int, float)) and t > 0:
-                floors.append(t)
-    return min(floors) if floors else None
+    _head, body = _split_window(records)
+    times = _inbound_times(body)
+    return min(times.values()) if times else None
 
 
-def _slim_tape_to_floor(tape, floor_ts):
-    """Keep tape records from the first inbound message at/after ``floor_ts``.
+def _slim_tape_to_floor(window, floor_ts):
+    """Keep a window's conversation from the first inbound message at/after ``floor_ts``.
 
-    Drops ``ContextSplice`` barriers and everything older than the shared floor,
-    starting the slice at a clean user-role turn boundary. When the agent has
-    been **idle since before the floor** (no inbound at/after it), keep ONLY its
-    most recent inbound turn — a breadcrumb, not the full stale window that
-    drives the churn (an idle agent resuming an abandoned task). Returns
-    ``None`` only when there is no inbound message at all (degenerate; the
-    caller keeps the per-agent record slim).
+    Drops everything older than the shared floor, starting the slice at a clean
+    user-role turn boundary. When the agent has been **idle since before the
+    floor** (no inbound at/after it), keep ONLY its most recent inbound turn — a
+    breadcrumb, not the full stale window that drives the churn (an idle agent
+    resuming an abandoned task). Returns ``None`` only when there is no inbound
+    message at all (degenerate; the caller keeps the per-agent record slim).
     """
-    from sagent.types.runtime import AgentSendMessage, UserMessage
-    from sagent.types.tape import ContextSplice
-
-    events = [r for r in tape if not isinstance(r, ContextSplice)]
-    inbound = [
-        i
-        for i, r in enumerate(events)
-        if isinstance(getattr(r, "event", None), (UserMessage, AgentSendMessage))
-    ]
+    head, body = _split_window(window)
+    inbound = [i for i, r in enumerate(body) if _is_inbound(r)]
     if not inbound:
         return None
+    times = _inbound_times(body)
     for i in inbound:
-        t = getattr(events[i].event, "timestamp", None)
-        if isinstance(t, (int, float)) and t >= floor_ts:
-            return events[i:]
+        if times.get(i, float("-inf")) >= floor_ts:
+            return _cut_window(head, body, i)
     # idle since before the floor → keep just the most recent turn.
-    return events[inbound[-1] :]
+    return _cut_window(head, body, inbound[-1])
 
 
 def _plan_slim_resume(loaded):
-    """Compute each agent's slimmed tape for a resume.
+    """Compute the window each agent resumes from.
 
-    ``loaded`` maps ``label -> (meta, tape, tool_state)``. Returns
-    ``label -> (slimmed_tape, note)``.
+    ``loaded`` maps ``label -> window`` (the records of the journal's last
+    context window). Returns ``label -> (window, note)``.
 
-    - ``full`` / ``materialize``: resume the whole tape (materialize writes the
-      session file directly, so there's no re-feed to bound).
+    - ``full``: resume the whole window.
     - ``slim``: **TL-anchored**. Slim the lead by record count to fix its recent
       window, take that window's wall-clock floor, and slim every other agent to
       that same floor — one shared temporal horizon, so no agent retains work
@@ -293,281 +323,223 @@ def _plan_slim_resume(loaded):
       (never a regression vs the pre-anchor behaviour).
     """
     if _RESUME_MODE != "slim":
-        return {label: (tape, "") for label, (_m, tape, _t) in loaded.items()}
+        return {label: (window, "") for label, window in loaded.items()}
 
     keep = _RESUME_KEEP_RECORDS
     plan: dict = {}
     floor = None
     lead = _RESUME_LEAD_ROLE
     if lead and lead in loaded:
-        lead_slim, _ = _slim_resume_tape(loaded[lead][1], keep)
+        lead_slim, _ = _slim_resume_tape(loaded[lead], keep)
         floor = _inbound_floor_ts(lead_slim)
         plan[lead] = (
             lead_slim,
             f" lead-anchor floor={floor:.0f}" if floor else " lead (no anchor)",
         )
 
-    for label, (_m, tape, _t) in loaded.items():
+    for label, window in loaded.items():
         if label in plan:
             continue
         if floor is not None:
-            anchored = _slim_tape_to_floor(tape, floor)
+            anchored = _slim_tape_to_floor(window, floor)
             if anchored is not None:
                 plan[label] = (anchored, " anchored-to-lead")
                 continue
-        slimmed, _ = _slim_resume_tape(tape, keep)
+        slimmed, _ = _slim_resume_tape(window, keep)
         plan[label] = (slimmed, " per-agent")
     return plan
 
 
-def _probe_claude_version() -> str:
-    """Return the live ``claude --version`` first token (e.g. ``2.1.183``).
+class _SlimmedJournal:
+    """A journal whose resume reads a trimmed window; everything else is the file's.
 
-    The materialized session JSONL stamps this into every entry's ``version``;
-    it should match the CLI that will ``--resume`` the file. Raises on failure
-    so the caller bails rather than writing a sentinel version.
+    sagent resumes an agent from ``iter(journal)`` — the last context window.
+    This hands it the slimmed window instead, while every write, and
+    ``history()``, still goes to the journal on disk: the file is untouched, so
+    the next restart re-slims from the full physical history.
     """
-    out = subprocess.run(
-        ["claude", "--version"], capture_output=True, text=True, timeout=10
-    ).stdout.strip()
-    return out.split()[0]
+
+    def __init__(self, journal, window) -> None:
+        self._journal = journal
+        self._window = list(window)
+
+    @property
+    def path(self):
+        return self._journal.path
+
+    def append(self, *records) -> None:
+        from sagent.session.types import ContextClear
+
+        self._journal.append(*records)
+        for record in records:
+            if isinstance(record, ContextClear):
+                self._window = []
+            self._window.append(record)
+
+    def __iter__(self):
+        return iter(tuple(self._window))
+
+    def __len__(self) -> int:
+        return len(self._journal)
+
+    def history(self, start: int = 0):
+        return self._journal.history(start)
+
+    def flush(self) -> None:
+        self._journal.flush()
 
 
-def _probe_git_branch(cwd) -> str:
-    """Best-effort current git branch for ``cwd`` (``HEAD`` on any failure)."""
-    try:
-        b = subprocess.run(
-            ["git", "-C", str(cwd), "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        ).stdout.strip()
-        return b or "HEAD"
-    except Exception:
-        return "HEAD"
+def _session_journal(label: str):
+    """Return ``label``'s (unopened) session journal, where a restart resumes from.
 
-
-def _materialize_on_resume(label: str, agent) -> bool:
-    """Write claude's session JSONL and mark the resumed history as delivered.
-
-    After ``agent.resume(...)`` the runtime holds the rehydrated (resolved)
-    context. We render it to a CLI-shaped session file at the exact path the
-    provider will read, then set the provider state so turn-1 is a clean
-    native ``--resume`` instead of a ``--session-id`` full re-feed:
-
-    - ``_session_on_disk = True`` → the spawn uses ``--resume <uuid>``.
-      Older providers call this state ``_session_initialized``.
-    - ``_last_sent_index = len(messages)`` → turn-1's stdin delta is empty, so the
-      N history messages already in the file are NOT re-fed (no double-apply,
-      no wedge). Setting only the on-disk flag would re-feed everything.
-    - ``_unanswered = None`` → no historical input is owed a retry.
-
-    Best-effort: any problem logs a warning, leaves the seams untouched, and
-    returns False — the agent is already correctly resumed, so turn-1 simply
-    falls back to the ``--session-id`` rebuild (the slim/full path). Never
-    raises into the boot loop. Returns True iff the provider state was updated.
+    A log an older sagent (<0.2) wrote at the same path is first rewritten in
+    place as today's journal — sagent keeps the original beside it as
+    ``session.legacy.jsonl``. One that cannot be rewritten is moved aside and
+    the agent starts fresh; boot never fails on it.
     """
-    from uuid import UUID
+    from sagent.session import legacy_journal
+    from sagent.session.jsonl import JsonlJournal
 
-    from sagent.types.model import ModelRequest
+    from .roles.common import journal_path_for
 
-    from agent_team.cli_session import materialize_session, session_jsonl_path
-
+    path = journal_path_for(label)
     try:
-        model = getattr(agent, "model", None)
-        session_id = getattr(model, "_session_id", None)
-        if session_id is None:
-            return False  # stateless / non-CLI provider — nothing to materialize
-        UUID(session_id)
-        path_helper = getattr(model, "_session_jsonl_path", None)
-        if not callable(path_helper) or not hasattr(model, "_last_sent_index"):
-            return False
-        if hasattr(model, "_session_on_disk"):
-            if not hasattr(model, "_unanswered"):
-                return False  # incomplete current session contract
-            state = {"_session_on_disk": True, "_unanswered": None}
-        elif hasattr(model, "_session_initialized"):
-            state = {"_session_initialized": True}
-        else:
-            return False
-
-        # The provider owns the config root (including named accounts and
-        # CLAUDE_CONFIG_DIR). Validate its target before touching any file.
-        expected = path_helper()
-        if expected is None:
-            return False
-        expected = Path(expected)
-        config_dir = expected.parent.parent.parent
-        try:
-            cwd = Path.cwd().resolve()
-        except OSError:
-            cwd = Path.cwd()
-        if (
-            expected.name != f"{session_id}.jsonl"
-            or expected.parent.parent.name != "projects"
-            or session_jsonl_path(
-                session_id, cwd=cwd, config_dir=config_dir
-            ) != expected
-            or (
-                os.environ.get("CLAUDE_CONFIG_DIR")
-                and getattr(model, "_persistent_tmpdir", None) is None
-                and config_dir != Path(os.environ["CLAUDE_CONFIG_DIR"])
-            )
-        ):
-            _LOG.warning(
-                "materialize %s: path mismatch (provider expects %s); "
-                "NOT changing state — turn-1 will rebuild",
-                label,
-                expected,
-            )
-            return False
-
-        messages = list(agent.runtime.context().messages)
-        # The materializer renders request.messages only (system/tools ride on
-        # the CLI argv, not the session file).
-        request = ModelRequest(messages=messages)
-        cli_version = _probe_claude_version()
-        path, _entries = materialize_session(
-            request,
-            session_id=session_id,
-            cwd=cwd,
-            git_branch=_probe_git_branch(cwd),
-            cli_version=cli_version,
-            config_dir=config_dir,
-        )
-        if Path(path) != expected:
-            _LOG.warning(
-                "materialize %s: path mismatch (wrote %s, provider expects %s); "
-                "NOT changing state — turn-1 will rebuild",
-                label,
-                path,
-                expected,
-            )
-            return False
-
-        state["_last_sent_index"] = len(messages)
-        previous = {key: getattr(model, key) for key in state}
-        try:
-            for key, value in state.items():
-                setattr(model, key, value)
-        except Exception:
-            for key, value in previous.items():
-                setattr(model, key, value)
-            raise
+        if legacy_journal.is_legacy(path):
+            if legacy_journal.upgrade(path):
+                _LOG.info("resume %s: upgraded the pre-0.2 session log", label)
+            else:
+                raise ValueError("it holds nothing to resume")
     except Exception as exc:
+        aside = path.with_name(f"session.unreadable-{int(time.time())}.jsonl")
+        path.replace(aside)
         _LOG.warning(
-            "materialize %s: failed (%s: %s); turn-1 will --session-id rebuild",
+            "resume %s: pre-0.2 session log not upgraded (%s: %s); moved to %s, "
+            "agent starts fresh",
             label,
             type(exc).__name__,
             exc,
+            aside,
         )
-        return False
-
-    _LOG.info(
-        "materialize %s: wrote %d-msg session at %s (cli %s); turn-1 will --resume",
-        label,
-        len(messages),
-        path,
-        cli_version,
-    )
-    return True
+    return JsonlJournal(path)
 
 
-def _resume_agents_from_session_dir(
-    agents, *, materialize_enabled: bool = False
-) -> None:
-    """Rehydrate each agent's tape from its sagent ``session.jsonl``.
+def _plan_resume(journals):
+    """Return the journal each agent resumes from, slimmed as the mode says.
 
-    Standard sagent restart-resume: each role's ``build_agent`` wired a
-    per-role ``session_dir`` (``Agent(session_dir=...)``), so a prior
-    ``serve.py`` run persisted its tape to ``<session_dir>/session.jsonl``.
-    On boot we ``load_session`` + ``Agent.resume`` each one. The resumed
-    tape then drives the provider: on the agent's first turn after resume,
-    the AnthropicCLI model re-feeds that history to ``claude --session-id``,
-    which rebuilds the on-disk CLI session; every later turn ``--resume``s and
-    feeds only deltas. No claude-session-file parsing -- sagent's own tape is
-    the single source of truth.
+    Standard sagent restart-resume: each role's agent is given its journal
+    (``<SAGENT_DATA_DIR>/sessions/<role>.sagent/session.jsonl``) and, when it
+    opens, loads the journal's last context window; its first turn then tells a
+    fresh ``claude`` that conversation. sagent's journal is the single source of
+    truth — no claude session file is read or written.
 
-    Mode (``AGENT_TEAM_RESUME_MODE``): ``slim`` trims each tape to its recent
-    tail so the first-turn re-feed stays small — the deterministic answer to the
-    fat-tape boot wedge — and **anchors the trim across agents on the lead**
-    (``_plan_slim_resume``) so a restart can't desync the team. ``full`` resumes
-    the untrimmed tape. ``materialize`` resumes the untrimmed tape AND (when the
-    boot drift-canary passed, ``materialize_enabled``) writes claude's session
-    file from the resolved context + flips the provider so turn-1 is a clean
-    native ``--resume`` (no re-feed at all). The on-disk sagent JSONL is
+    Mode (``AGENT_TEAM_RESUME_MODE``): ``slim`` trims each window to its recent
+    tail so that first-turn re-feed stays small, and **anchors the trim across
+    agents on the lead** (``_plan_slim_resume``) so a restart can't desync the
+    team. ``full`` resumes the untrimmed window. The on-disk journal is
     untouched in every mode.
 
-    Three phases so ``slim`` can anchor across agents: load every tape, plan the
-    (cross-agent) slim, then resume + materialize. Best-effort and never crashes
-    boot: a per-agent failure logs a warning and that agent starts fresh.
+    Best-effort and never crashes boot: if the plan cannot be computed, every
+    agent resumes its whole window.
     """
-    from sagent.agent.session_io import load_session
+    loaded = {label: list(journal) for label, journal in journals.items()}
+    try:
+        plan = _plan_slim_resume(loaded)
+    except Exception as exc:
+        _LOG.warning(
+            "resume: slim plan failed (%s: %s); resuming every agent in full",
+            type(exc).__name__,
+            exc,
+        )
+        plan = {label: (window, "") for label, window in loaded.items()}
 
-    # Phase 1 — load every agent's persisted tape.
-    loaded: dict = {}  # label -> (meta, tape, tool_state)
-    for label, agent in agents.items():
-        if agent.session_dir is None:
-            continue
-        try:
-            res = load_session(agent.session_dir, {})
-        except Exception as exc:
-            _LOG.warning(
-                "resume %s: load failed (%s: %s); agent starts fresh",
-                label,
-                type(exc).__name__,
-                exc,
-            )
-            continue
-        if res is None:
+    resumed = {}
+    for label, journal in journals.items():
+        window, note = plan[label]
+        full = loaded[label]
+        if not full:
             _LOG.info("resume %s: no prior session.jsonl — fresh start", label)
-            continue
-        loaded[label] = res
-
-    # Phase 2 — plan the slim (TL-anchored in `slim`; whole tape otherwise).
-    plan = _plan_slim_resume(loaded)
-
-    # Phase 3 — resume each agent, then (materialize) write its session file.
-    for label, (meta, tape, tool_state) in loaded.items():
-        agent = agents[label]
-        try:
-            slimmed, note = plan[label]
-            agent.resume(meta, slimmed, tool_state)
-            if len(slimmed) != len(tape):
-                _LOG.info(
-                    "resume %s [%s]: %d -> %d tape records%s",
-                    label,
-                    _RESUME_MODE,
-                    len(tape),
-                    len(slimmed),
-                    note,
-                )
-            else:
-                _LOG.info(
-                    "resume %s [%s]: %d tape records%s",
-                    label,
-                    _RESUME_MODE,
-                    len(tape),
-                    note,
-                )
-            # materialize mode: write the CLI session file from the resolved
-            # context + flip the seam so turn-1 is a clean native --resume.
-            if _RESUME_MODE == "materialize" and materialize_enabled:
-                _materialize_on_resume(label, agent)
-        except Exception as exc:
-            _LOG.warning(
-                "resume %s: resume failed (%s: %s); agent starts fresh",
+            resumed[label] = journal
+        elif len(window) != len(full):
+            _LOG.info(
+                "resume %s [%s]: %d -> %d journal records%s",
                 label,
-                type(exc).__name__,
-                exc,
+                _RESUME_MODE,
+                len(full),
+                len(window),
+                note,
             )
+            resumed[label] = _SlimmedJournal(journal, window)
+        else:
+            _LOG.info(
+                "resume %s [%s]: %d journal records%s",
+                label,
+                _RESUME_MODE,
+                len(full),
+                note,
+            )
+            resumed[label] = journal
+    return resumed
+
+
+async def _build_all_agents(profile, stack):
+    """Construct, resume and open the roster's role agents; return them by label.
+
+    Only the roles in ``profile.roster`` are instantiated (1..N). Each agent
+    gets the tools of its own peer-messaging MCP server, started with
+    ``SAGENT_ROLE=<label>`` in the server's env — sagent_send/sagent_defer/
+    sagent_self reach the model as ``mcp__sagent_chat__*`` and are the only
+    path for peer messaging. A single-role roster boots fine: there are simply
+    no peers to address (only ``user``).
+
+    Everything opened here — the shared provider, each journal, each MCP
+    session, each agent — is entered on ``stack``, which the caller closes on
+    shutdown (agents first, so each writes its session before its journal
+    closes).
+    """
+    from .roles.common import build_provider, chat_session
+    from .runtime import trace_writer
+
+    builders = _role_builders()
+    for label in profile.roster:
+        if label not in builders:
+            raise ValueError(
+                f"roster references unknown role {label!r}; "
+                f"known roles: {sorted(builders)}"
+            )
+
+    provider = await stack.enter_async_context(build_provider())
+    journals = {}
+    for label in profile.roster:
+        journals[label] = await stack.enter_async_context(_session_journal(label))
+    resumed = _plan_resume(journals)
+
+    agents = {}
+    for label in profile.roster:
+        chat = await stack.enter_async_context(chat_session(label))
+        chat_tools = chat.tools()
+        if not chat_tools:
+            raise RuntimeError(
+                f"peer-messaging MCP server for {label!r} did not connect "
+                f"({chat.status()}); the agent could not message anyone"
+            )
+        agent = builders[label](
+            profile,
+            provider=provider,
+            journal=resumed[label],
+            chat_tools=chat_tools,
+        )
+        trace_writer.install_on(agent, label)
+        # Opening resumes the journal's window and starts the agent's loop.
+        await stack.enter_async_context(agent)
+        agents[label] = agent
+    return agents
 
 
 # --------------------------------------------------------------------------
 # Startup warmup — fire one MCP-tool-call-using turn per agent before
-# accepting user traffic, so the first real user message doesn't hit the
-# AnthropicCLI's "first-turn fumbles MCP tool calls" pattern observed in
-# spike sigint_probe3 and race_repro_v2.
+# accepting user traffic, so the first real user message doesn't pay the
+# ``claude`` cold start or hit the "first-turn fumbles MCP tool calls"
+# pattern observed in spike sigint_probe3 and race_repro_v2.
 # --------------------------------------------------------------------------
 
 
@@ -613,7 +585,8 @@ async def _warmup_agents(agents, *, timeout_s: float = 90.0) -> dict[str, bool]:
     non-empty``), so a single-word ack on the warmup turn guarantees
     the history shape is valid for subsequent turns.
     """
-    from sagent.types.runtime import AgentIdle, UserMessage
+    from sagent.runtime.types import AgentIdle
+    from sagent.session.types import UserMessage
 
     try:
         idle_events: dict[str, asyncio.Event] = {}
@@ -636,7 +609,9 @@ async def _warmup_agents(agents, *, timeout_s: float = 90.0) -> dict[str, bool]:
         _SUPPRESS_FLAG.touch()
 
         for label, agent in agents.items():
-            agent.runtime.inbox.push_back(UserMessage(text=_WARMUP_PROMPT))
+            agent.runtime.push(
+                UserMessage(content=_WARMUP_PROMPT, timestamp=_now_iso())
+            )
 
         async def _wait_one(label: str) -> tuple[str, bool]:
             try:
@@ -651,15 +626,13 @@ async def _warmup_agents(agents, *, timeout_s: float = 90.0) -> dict[str, bool]:
                 agent.runtime.observers.remove(watcher)
             except ValueError:
                 pass
-        # DO NOT call Agent.clear() here. It works in principle (preempt
-        # + wipe history + reset per-tool recall) but in the
-        # AnthropicCLI path, the history shrink trips
-        # ``_should_respawn`` in the provider, which kills the warm
-        # CLI subprocess and respawns a fresh one — undoing exactly
-        # the MCP-bridge warmup we just paid for. Leave the warmup
-        # turn in history; the new prompt's explicit "do NOT reuse
-        # this pattern" framing + the use of ``sagent_self`` (silent
-        # to peers) means even a parrot-after-respawn doesn't leak.
+        # DO NOT clear the session here. A cleared history no longer
+        # matches what the warm ``claude`` subprocess has seen, so the
+        # provider starts a fresh one — undoing exactly the warmup we
+        # just paid for. Leave the warmup turn in history; the prompt's
+        # explicit "do NOT reuse this pattern" framing + the use of
+        # ``sagent_self`` (silent to peers) means even a
+        # parrot-after-respawn doesn't leak.
         return dict(results)
     finally:
         # Re-enable audit logging + peer deliveries for real traffic.
@@ -810,33 +783,23 @@ def _diagnose_agent(label: str, agent) -> dict[str, Any]:
     Sagent's single-process model maps the chat/ status set (dead, hung,
     stuck, working, idle) like this:
       - dead   : never (if HTTP is up, the agent's asyncio task is alive)
-      - working: model_call is not None
-      - hung   : model_call active AND last assistant turn >90s ago (or never)
-      - stuck  : inbox has queued messages AND no model_call AND no recent activity
-      - idle   : model_call None and inbox empty
+      - working: a model call or a tool call it waits on is in flight
+      - hung   : in flight AND last assistant turn >90s ago (or never)
+      - stuck  : inbox has queued messages AND nothing in flight AND no recent activity
+      - idle   : nothing in flight and inbox empty
     """
-    from datetime import datetime
-
-    in_flight_call = agent.runtime.model_call is not None
+    # The tool calls the model is waiting on. sagent runs them itself (the
+    # ``claude`` subprocess only holds the call), so no model call is in flight
+    # while they run.
+    tools_running = [
+        job.call.name for job in agent.runtime.jobs.values() if job.state == "running"
+    ]
+    in_flight_call = agent.runtime.model_call is not None or bool(tools_running)
     inbox_pending = 0
     try:
         inbox_pending = agent.runtime.inbox._queue.qsize()
     except AttributeError:
         pass
-
-    # Compute last_assistant_ts + age_sec from history tail.
-    last_ts_iso: str | None = None
-    age_sec: int | None = None
-    for m in reversed(agent.history):
-        if type(m).__name__ == "AssistantMessage":
-            ts = getattr(m, "timestamp", None)
-            if isinstance(ts, (int, float)):
-                last_ts_iso = (
-                    datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.")
-                    + f"{int((ts % 1) * 1000):03d}Z"
-                )
-                age_sec = int(datetime.now(UTC).timestamp() - ts)
-            break
 
     # Recent trace events (last 6) — sourced from the trace file rather
     # than agent.runtime.events to match chat/'s "tail the trace" check.
@@ -847,6 +810,21 @@ def _diagnose_agent(label: str, agent) -> dict[str, Any]:
         events = _read_jsonl(tp)
     except Exception:
         events = []
+
+    # last_assistant_ts + age_sec: when the model last finished a reply, as the
+    # trace recorded it (sagent's own records carry no wall-clock for a reply).
+    last_ts_iso: str | None = None
+    age_sec: int | None = None
+    for ev in reversed(events):
+        if (ev.get("_event") or "?") == "ModelResponseComplete":
+            last_ts_iso = ev.get("_ts") or None
+            try:
+                spoke = datetime.fromisoformat(last_ts_iso.replace("Z", "+00:00"))
+                age_sec = int(datetime.now(UTC).timestamp() - spoke.timestamp())
+            except (AttributeError, ValueError):
+                last_ts_iso = None
+            break
+
     recent = []
     for ev in events[-6:]:
         kind, text = _event_search_text(ev)
@@ -869,18 +847,11 @@ def _diagnose_agent(label: str, agent) -> dict[str, Any]:
             started_idx = i
         elif k in ("ModelIdle", "ModelResponseComplete", "ModelResponseError"):
             ended_idx = i
-    in_turn = started_idx > ended_idx
+    in_turn = started_idx > ended_idx or bool(tools_running)
 
     inflight: str | None = None
     if in_turn:
-        # The most recent ToolLabel published since the turn began is our
-        # best proxy for "what tool is currently running".
-        for ev in reversed(events[-100:]):
-            if (ev.get("_event") or "?") == "ToolLabel":
-                inflight = str(ev.get("text") or ev.get("label") or "")
-                break
-        if inflight is None:
-            inflight = "model thinking"
+        inflight = ", ".join(tools_running) or "model thinking"
 
     # Last completed turn outcome.
     last_result: dict[str, Any] | None = None
@@ -927,7 +898,7 @@ def _diagnose_agent(label: str, agent) -> dict[str, Any]:
 
     model_id = ""
     try:
-        model_id = agent.model.model_id
+        model_id = agent.model.capability.model_id
     except AttributeError:
         pass
 
@@ -939,8 +910,9 @@ def _diagnose_agent(label: str, agent) -> dict[str, Any]:
     try:
         deque_items = list(agent.runtime.inbox._queue._queue)
         for item in deque_items[:4]:
-            text = (getattr(item, "text", "") or "").replace("\n", " ")[:140]
-            src = getattr(item, "source", "") or type(item).__name__
+            body = getattr(item, "content", None) or getattr(item, "text", "")
+            text = (body or "").replace("\n", " ")[:140]
+            src = getattr(item, "sender", "") or type(item).__name__
             pending_preview.append(
                 {
                     "from": src,
@@ -969,7 +941,7 @@ def _diagnose_agent(label: str, agent) -> dict[str, Any]:
         "pending_preview": pending_preview,
         "recent": recent,
         "model_id": model_id,
-        "total_cost_usd": float(agent.total_cost_usd),
+        "total_cost_usd": float(agent.spend_usd),
     }
 
 
@@ -978,8 +950,9 @@ def _render_recent_turns(
 ) -> str:
     """Render the agent's last ``n_turns`` turns as a plain-text breadcrumb.
 
-    A *turn* starts at a ``UserMessage`` (an inbound operator/peer message or
-    the prior bootstrap) and runs through the assistant's reply. The
+    A *turn* starts at an inbound message (an operator's ``UserMessage``, a
+    peer's ``AgentToAgentMessage``, or the prior bootstrap) and runs through
+    the assistant's reply. The
     ``clear tape`` restart hands this to the freshly-cleared agent as
     orientation — WITHOUT reconstructing tape records, which would risk an
     invalid post-barrier tape (dangling tool_result / broken ordinal refs).
@@ -987,27 +960,30 @@ def _render_recent_turns(
     failure returns ``""`` so the restart never blocks on it.
     """
     try:
-        from sagent.types.runtime import AssistantMessage, UserMessage
+        from sagent.model.types import Response
+        from sagent.session.types import AssistantMessage, ToolCall
 
         messages = list(agent.runtime.context().messages)
     except Exception:
         return ""
-    user_idxs = [i for i, m in enumerate(messages) if isinstance(m, UserMessage)]
+    user_idxs = [i for i, m in enumerate(messages) if _is_inbound(m)]
     if not user_idxs:
         return ""
     start = user_idxs[-n_turns] if len(user_idxs) >= n_turns else user_idxs[0]
     lines: list[str] = []
     for m in messages[start:]:
-        if isinstance(m, UserMessage):
-            txt = (m.text or "").strip()
+        if _is_inbound(m):
+            txt = (m.content or "").strip()
             if txt:
                 lines.append(f"[inbound] {txt[:400]}")
-        elif isinstance(m, AssistantMessage):
-            txt = (m.text or "").strip()
+        elif isinstance(m, Response):
+            txt = "".join(
+                r.content or "" for r in m.records if isinstance(r, AssistantMessage)
+            ).strip()
             if txt:
                 lines.append(f"[{label}] {txt[:400]}")
-            if m.tool_calls:
-                names = ", ".join(tc.name for tc in m.tool_calls)
+            names = ", ".join(r.name for r in m.records if isinstance(r, ToolCall))
+            if names:
                 lines.append(f"[{label} → tools] {names}")
     block = "\n".join(lines).strip()
     if len(block) > max_chars:
@@ -1127,24 +1103,25 @@ def _build_http_app(agents):
         # One agent, three intensities (``mode``); single-process model, so we
         # can't kill+respawn one subprocess cleanly. From gentlest to bluntest:
         #
-        #   slim     -- ``Agent.compact()``: summarize old turns → keep a real
-        #               summary + the recent working thread. Shrinks the
-        #               effective re-feed (the splice/override persists, so a
+        #   slim     -- the session's compactor: summarize old turns → keep a
+        #               real summary + the recent working thread. Shrinks the
+        #               effective re-feed (the new window is journaled, so a
         #               later boot resumes slim too) WITHOUT wiping context or
-        #               interrupting the task. This is the normal async
-        #               ``/compact`` path (NOT ``compact_now``, the synchronous
-        #               overflow-recovery path that crashed tech-writer); it
-        #               fails safe — the tape is untouched on CompactFailed.
-        #               For a long-but-healthy agent (e.g. TL) whose tape is
-        #               growing but whose coordination memory must survive.
-        #   soft     -- ``Agent.clear()`` only, inbox preserved. Full wipe.
+        #               interrupting the task. This is sagent's normal
+        #               ``/compact`` path, run at the runtime's next safe
+        #               point; it fails safe — the session is untouched on
+        #               CompactFailed. For a long-but-healthy agent (e.g. TL)
+        #               whose session is growing but whose coordination memory
+        #               must survive.
+        #   soft     -- ``session.clear()`` only, inbox preserved. Full wipe.
         #   reanchor -- capture a last-turns breadcrumb, drop the backlog,
         #               ``clear()``, then push a role-specific "re-sync before
-        #               acting" directive. ``clear()`` writes a durable
-        #               ``context_clear`` barrier so the re-feed is tiny — this
-        #               kills the catalog-timeout wedge a full-tape re-feed
-        #               triggers. For recovering a stuck/confused agent.
-        from sagent.types.runtime import UserMessage
+        #               acting" directive. ``clear()`` starts a new journaled
+        #               window so the re-feed is tiny — this kills the wedge a
+        #               full-session re-feed triggers. For recovering a
+        #               stuck/confused agent.
+        from sagent.runtime import types as runtime_types
+        from sagent.session.types import AgentToAgentMessage, UserMessage
 
         client_host = (request.client.host if request.client else "") or ""
         if client_host not in ("127.0.0.1", "::1", "localhost", ""):
@@ -1226,18 +1203,29 @@ def _build_http_app(agents):
                     }
                 )
             try:
-                # ``compact()`` resolves on CompactComplete OR CompactFailed;
-                # the timeout guards a wedged compaction subprocess. A large
-                # tape's summary call can take a while, hence the generous cap.
-                await asyncio.wait_for(agent.compact(), timeout=180.0)
+                # ``run()`` returns on CompactComplete and raises what a
+                # CompactFailed carried; the timeout guards a wedged compaction
+                # subprocess. A large session's summary call can take a while,
+                # hence the generous cap.
+                compact_err: BaseException | None = None
+                try:
+                    await asyncio.wait_for(
+                        agent.session.compactor.run(), timeout=180.0
+                    )
+                except (asyncio.TimeoutError, TimeoutError):
+                    raise
+                except Exception as exc:
+                    compact_err = exc
                 after = (
                     len(agent.runtime.context().messages)
                     if before is not None
                     else None
                 )
-                compact_err = getattr(agent, "last_compact_error", None)
-                if compact_err:
-                    notes.append(f"compaction failed: {compact_err}; tape unchanged")
+                if compact_err is not None:
+                    notes.append(
+                        f"compaction failed: {type(compact_err).__name__}: "
+                        f"{compact_err}; tape unchanged"
+                    )
                     ok = False
                 elif before is not None and after is not None and after < before:
                     notes.append(f"compacted: context {before} → {after} messages")
@@ -1266,32 +1254,35 @@ def _build_http_app(agents):
         if mode == "reanchor":
             # Capture the breadcrumb BEFORE clear() wipes the live context.
             recent_block = _render_recent_turns(agent, role)
-            # Drain the inbox (drop stale backlog). GatedDeque wraps
-            # asyncio.Queue (sagent runtime.py:552); its underlying
-            # ``_queue`` is a ``collections.deque`` we drop directly.
-            try:
-                q = agent.runtime.inbox._queue
-                drained = 0
-                while not q.empty():
-                    try:
-                        q.get_nowait()
-                        drained += 1
-                    except Exception:
-                        break
-                notes.append(f"drained {drained} pending inbox item(s)")
-            except AttributeError:
-                notes.append("inbox drain unsupported on this sagent version")
+            # Drop the stale backlog: every message still waiting in the
+            # inbox. Anything else queued there (a tool result, scheduled
+            # work) is the runtime's own and goes back in order.
+            backlog = (
+                UserMessage,
+                AgentToAgentMessage,
+                runtime_types.UserQueuedMessage,
+                runtime_types.UserDeferredMessage,
+                runtime_types.AgentSendQueuedMessage,
+                runtime_types.AgentSendDeferredMessage,
+            )
+            drained = 0
+            for item in agent.runtime.inbox.drain_nowait():
+                if isinstance(item, backlog):
+                    drained += 1
+                else:
+                    agent.runtime.inbox.push_back(item)
+            notes.append(f"drained {drained} pending inbox item(s)")
 
         # --- soft + reanchor: clear() (timeout-guarded) ----------------------
-        # ``Agent.clear()`` preempts the in-flight model_call + wipes
-        # history + resets the per-tool recall cache. The HotSpare's
-        # ``_should_respawn`` check then triggers a fresh ``claude --print``
-        # subprocess on the next model call (history.length < last_sent_index).
-        # Bounded by a timeout: a hard-wedged agent can block clear() on
-        # ``await proc.close()`` for a SIGINT-resistant subprocess (observed
-        # on tech-writer); report "needs L3" rather than hang the request.
+        # ``session.clear()`` cancels the in-flight model call and every
+        # tool, wipes the history and forgets which files the model has read.
+        # The provider then starts a fresh ``claude --print`` subprocess on
+        # the next model call (the one running no longer matches the history).
+        # Bounded by a timeout: a hard-wedged agent can block clear() on a
+        # SIGINT-resistant subprocess (observed on tech-writer); report
+        # "needs L3" rather than hang the request.
         try:
-            await asyncio.wait_for(agent.clear(), timeout=20.0)
+            await asyncio.wait_for(agent.session.clear(), timeout=20.0)
             notes.append("history cleared; CLI subprocess will respawn on next turn")
             ok = True
         except (asyncio.TimeoutError, TimeoutError):
@@ -1307,8 +1298,11 @@ def _build_http_app(agents):
         # Re-anchor: push the role-specific first turn (+ orientation block).
         if ok and mode == "reanchor":
             try:
-                agent.runtime.inbox.push_back(
-                    UserMessage(text=_reanchor_prompt(role, recent_block))
+                agent.runtime.push(
+                    UserMessage(
+                        content=_reanchor_prompt(role, recent_block),
+                        timestamp=_now_iso(),
+                    )
                 )
                 notes.append(
                     "pushed re-anchor prompt (clear tape: last turns + "
@@ -1327,26 +1321,27 @@ def _build_http_app(agents):
 
     async def interrupt(request: Request) -> Response:
         """Soft interrupt: Halt one agent's in-flight model turn WITHOUT
-        wiping history (unlike ``/api/restart`` → ``Agent.clear()``).
+        wiping history (unlike ``/api/restart`` → ``session.clear()``).
 
-        Pushes a ``Halt`` via the public ``Agent.halt()``: the runtime
-        cancels the in-flight ``model_call``; the AnthropicCLI provider's
-        ``asyncio.CancelledError`` handler SIGINTs the mid-turn
-        ``claude --print`` subprocess so the opaque internal tool loop
-        stops; the runtime then drains any operator/peer message buffered
-        during the turn (``_mid_stream_queue``) and the agent acts on it.
+        Pushes a ``Halt`` via the public ``runtime.halt()``: the runtime
+        cancels the in-flight model call, which stops the mid-turn
+        ``claude --print`` subprocess (tool calls already started keep
+        running); the runtime then takes any operator message buffered
+        while the reply streamed and the agent acts on it. With nothing
+        buffered, the agent waits for the next message.
 
         This restores the graceful "redirect a mid-flight agent"
         capability that the removed per-message ``urgent`` flag used to
         gate (default stays non-interrupting; this is the explicit opt-in
         escape hatch). It is ENTIRELY host-side — the Halt machinery and
-        the cancellable CLI stream already exist in sagent; only the
-        trigger was removed upstream, and this re-adds it without any
-        sagent change.
+        the cancellable CLI stream already exist in sagent.
 
-        Typical redirect: POST the new instruction to ``/api/post`` (it
-        buffers while the turn runs), then POST here to abort the current
-        turn so the buffered message is acted on immediately. Loopback-only.
+        Typical redirect: POST the new instruction to ``/api/post`` as the
+        operator (it buffers while the reply streams), then POST here to
+        abort the current turn so the buffered message is acted on
+        immediately. A PEER's message is held until the agent is free, so
+        it is not what a halt hands over: it is delivered with the next
+        message that arrives. Loopback-only.
         """
         client_host = (request.client.host if request.client else "") or ""
         if client_host not in ("127.0.0.1", "::1", "localhost", ""):
@@ -1366,7 +1361,7 @@ def _build_http_app(agents):
         agent = agents[role]
         in_flight = agent.runtime.model_call is not None
         try:
-            agent.halt()
+            agent.runtime.halt()
             return JSONResponse(
                 {
                     "ok": True,
@@ -1536,18 +1531,19 @@ def _build_http_app(agents):
 
           - ``from`` absent or ``"user"``: operator ingress. Writes a
             ``user → [to]`` audit record and pushes ``UserMessage``
-            into the target's inbox (existing web-UI behavior).
+            into the target's inbox (existing web-UI behavior): the
+            agent takes it up at its next model round.
           - ``from`` is a known agent label: peer routing called by
             the plugin's MCP server. Writes a ``<from> → [to]`` audit
-            record and pushes ``AgentSendMessage(source=<from>)`` into
-            the target's inbox. This is how the out-of-process MCP
-            server (subprocess of ``claude --print``) reaches the
-            in-process ``agent_registry`` that ``serve.py`` owns.
-            Respects the ``_SUPPRESS_FLAG`` sentinel for warmup-window
-            silence.
+            record and pushes ``AgentSendQueuedMessage(sender=<from>)``
+            into the target's inbox, which the runtime holds until the
+            target's current turn is done — a peer never preempts. This
+            is how the out-of-process MCP server reaches the live agents
+            that ``serve.py`` owns. Respects the ``_SUPPRESS_FLAG``
+            sentinel for warmup-window silence.
         """
-        from sagent.tools.core import agent_registry
-        from sagent.types.runtime import AgentSendMessage, UserMessage
+        from sagent.runtime.types import AgentSendQueuedMessage
+        from sagent.session.types import UserMessage
 
         payload = await request.json()
         to = str(payload.get("to", "")).strip()
@@ -1558,8 +1554,8 @@ def _build_http_app(agents):
             return JSONResponse(
                 {"error": "both 'to' and 'body' are required"}, status_code=400
             )
-        target = agent_registry.get(to)
-        if target is None:
+        target = agents.get(to)
+        if target is None and to not in _MAILBOXES:
             return JSONResponse(
                 {"error": f"unknown target {to!r}; active: {sorted(agents)}"},
                 status_code=404,
@@ -1568,26 +1564,23 @@ def _build_http_app(agents):
         # log is the visible surface; no inbox push.
         suppress = _SUPPRESS_FLAG.exists()
         if from_role == "user":
-            if to == "user":
+            if target is None:
                 return JSONResponse(
-                    {"error": "user→user is meaningless; pick an agent"},
+                    {"error": f"user→{to} is meaningless; pick an agent"},
                     status_code=400,
                 )
             if not suppress:
                 delivery.append_user_message(to_role=to, body=body)
-            target.runtime.inbox.push_back(
-                UserMessage(text=body),
+            target.runtime.push(
+                UserMessage(content=body, timestamp=_now_iso()),
             )
         else:
             # Peer routing path called by the MCP server.
             if not suppress:
                 delivery.append_record(from_role=from_role, to=[to], body=body)
-            if to != "user":
-                target.runtime.inbox.push_back(
-                    AgentSendMessage(
-                        source=from_role,
-                        text=body,
-                    ),
+            if target is not None:
+                target.runtime.push(
+                    AgentSendQueuedMessage(sender=from_role, text=body),
                 )
         # ``urgent`` — DISABLED 2026-06-19 (queues only; does NOT preempt).
         # Intended behaviour was to ``Agent.halt()`` the recipient's in-flight
@@ -1603,7 +1596,7 @@ def _build_http_app(agents):
         # still delivered (queued above), it just won't preempt. Re-enable the halt
         # call only once upstream confirms+fixes the CLI bridge-reset. See worklog
         # 2026-06-19 large-tape-mcp-connect-wedge lesson + the halt-wedge decision.
-        if urgent and to != "user":
+        if urgent and target is not None:
             _LOG.warning(
                 "urgent=true to %r: halt is DISABLED (wedges the MCP bridge, "
                 "pending upstream fix) — message queued, not preempted",
@@ -1626,14 +1619,13 @@ def _build_http_app(agents):
         Body: ``{to, body, delay_s, from?}``. Defaults ``from="operator"``.
 
         Schedules an ``asyncio.call_later`` that pushes
-        ``AgentSendMessage(source=<from>, text='[defer +Ns] <body>')``
+        ``AgentSendQueuedMessage(sender=<from>, text='[defer +Ns] <body>')``
         into the target's inbox after ``delay_s`` seconds. Audit log
         receives one record at schedule time with body
         ``[defer +Ns scheduled] <body>``. Sentinel-respecting same as
         ``/api/post``.
         """
-        from sagent.tools.core import agent_registry
-        from sagent.types.runtime import AgentSendMessage
+        from sagent.runtime.types import AgentSendQueuedMessage
 
         client_host = (request.client.host if request.client else "") or ""
         if client_host not in ("127.0.0.1", "::1", "localhost", ""):
@@ -1660,8 +1652,8 @@ def _build_http_app(agents):
             return JSONResponse(
                 {"error": "delay_s must be in [1, 86400]"}, status_code=400
             )
-        target = agent_registry.get(to)
-        if target is None or to == "user":
+        target = agents.get(to)
+        if target is None:
             return JSONResponse(
                 {"error": f"unknown target {to!r}; active: {sorted(agents)}"},
                 status_code=404,
@@ -1670,12 +1662,11 @@ def _build_http_app(agents):
         marked = f"[defer +{delay_s}s] {body}"
 
         def _fire() -> None:
-            tgt = agent_registry.get(to)
-            if tgt is None:
-                _LOG.warning("defer: target @%s gone from registry; dropping", to)
+            if not target.running:
+                _LOG.warning("defer: target @%s is no longer running; dropping", to)
                 return
-            tgt.runtime.inbox.push_back(
-                AgentSendMessage(source=from_role, text=marked),
+            target.runtime.push(
+                AgentSendQueuedMessage(sender=from_role, text=marked),
             )
 
         asyncio.get_running_loop().call_later(delay_s, _fire)
@@ -1745,98 +1736,51 @@ async def _amain(host: str, port: int) -> int:
         profile.roster,
     )
 
-    agents = _build_all_agents(profile)
-    _LOG.info("brought up %d agents: %s", len(agents), sorted(agents))
+    if _RESUME_MODE_WARNING:
+        _LOG.warning("%s", _RESUME_MODE_WARNING)
 
-    # Restart-resume: rehydrate each agent's tape from its sagent
-    # ``session.jsonl`` BEFORE it starts serving (and before warmup).
-    # See AGENT_TEAM_RESUME_MODE (full|slim|materialize).
-    if _RESUME_MODE not in _VALID_RESUME_MODES:
-        _LOG.warning(
-            "AGENT_TEAM_RESUME_MODE=%r invalid; using 'slim' (valid: %s)",
-            _RESUME_MODE,
-            "|".join(_VALID_RESUME_MODES),
+    # Everything the team holds open — the provider, each role's journal, MCP
+    # session and agent — closes with this stack, in reverse order.
+    async with AsyncExitStack() as stack:
+        # Restart-resume happens as each agent opens: it loads its session
+        # journal's last window (slimmed, in `slim` mode) BEFORE it serves a
+        # turn (and before warmup). See AGENT_TEAM_RESUME_MODE (slim|full).
+        agents = await _build_all_agents(profile, stack)
+        _LOG.info("brought up %d agents: %s", len(agents), sorted(agents))
+
+        # Startup warmup — one "call ``sagent_self``, then say ok" round-trip
+        # per agent, so the ``claude`` subprocess, its tool catalog and the
+        # peer-messaging server are all proven live before real traffic.
+        # Without it (sagent 0.1's CLI provider), the very first model call
+        # after the subprocess spawned could hang indefinitely (observed
+        # 2026-06-01: >5 min no reply). The probe is silent: the sentinel
+        # keeps it out of ``main.jsonl`` and ``sagent_self`` reaches no peer.
+        _LOG.info("warming up agents (≤90s)…")
+        warmup_results = await _warmup_agents(agents)
+        ok = [l for l, v in warmup_results.items() if v]
+        timed_out = [l for l, v in warmup_results.items() if not v]
+        _LOG.info(
+            "warmup done: ready=%s timed_out=%s", sorted(ok), sorted(timed_out)
         )
-    # materialize mode is gated by a one-shot boot drift-canary: spawn a
-    # throwaway claude, materialize a session, structurally diff vs claude's
-    # own output. On drift (claude changed its session format) we DISABLE
-    # materialize for this boot and fall back to slim, logging the findings.
-    _materialize_enabled = False
-    if _RESUME_MODE == "materialize":
-        try:
-            from agent_team.cli_session import (
-                arun_canary_against_live_cli,
-                is_safe_to_enable,
-            )
 
-            _LOG.info("resume-mode=materialize: running boot drift-canary…")
-            _canary = await arun_canary_against_live_cli()
-            if is_safe_to_enable(_canary.findings):
-                _materialize_enabled = True
-                _LOG.info(
-                    "drift-canary PASSED (cli %s) — materialize-on-resume enabled",
-                    _probe_claude_version(),
-                )
-            else:
-                _LOG.warning(
-                    "drift-canary FOUND DRIFT (%d findings); FALLING BACK TO "
-                    "SLIM for this boot:",
-                    len(_canary.findings),
-                )
-                for _f in _canary.findings:
-                    _LOG.warning(
-                        "  drift %s: %s",
-                        getattr(_f, "location", "?"),
-                        getattr(_f, "detail", "?"),
-                    )
-        except Exception as exc:
-            _LOG.warning(
-                "drift-canary errored (%s: %s); falling back to slim for this boot",
-                type(exc).__name__,
-                exc,
-            )
-    _resume_agents_from_session_dir(agents, materialize_enabled=_materialize_enabled)
+        app = _build_http_app(agents)
+        config = uvicorn.Config(
+            app, host=host, port=port, log_level="warning", access_log=False
+        )
+        server = uvicorn.Server(config)
+        _LOG.info("starting HTTP server on http://%s:%d", host, port)
+        http_task = asyncio.create_task(server.serve(), name="http")
 
-    serve_tasks = await _serve_agents_forever(agents)
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop.set)
 
-    # Startup warmup — empirically required for the AnthropicCLI
-    # provider. Without it, the very first model_call after the
-    # ``claude --print`` subprocess spawns hangs indefinitely
-    # (observed 2026-06-01: >5 min no reply), the same first-turn
-    # MCP-tool-fumble pattern we documented in the Phase 0 spike.
-    # The warmup is a "hello → AgentSend(to=user, content='ready')"
-    # round-trip per agent, structured so the model is conditioned on
-    # the SAME ``AgentSend(to=user)`` template we want it to use for
-    # real replies. The cost is one ``hello, ready`` record per agent
-    # in ``main.jsonl`` at startup — visible noise but small and
-    # easily filtered.
-    _LOG.info("warming up agents (≤90s)…")
-    warmup_results = await _warmup_agents(agents)
-    ok = [l for l, v in warmup_results.items() if v]
-    timed_out = [l for l, v in warmup_results.items() if not v]
-    _LOG.info("warmup done: ready=%s timed_out=%s", sorted(ok), sorted(timed_out))
-
-    app = _build_http_app(agents)
-    config = uvicorn.Config(
-        app, host=host, port=port, log_level="warning", access_log=False
-    )
-    server = uvicorn.Server(config)
-    _LOG.info("starting HTTP server on http://%s:%d", host, port)
-    http_task = asyncio.create_task(server.serve(), name="http")
-
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
-
-    await stop.wait()
-    _LOG.info("shutdown signal received; stopping HTTP server")
-    server.should_exit = True
-    await http_task
-    _LOG.info("stopping agents")
-    for agent in agents.values():
-        agent.shutdown()
-    await asyncio.gather(*serve_tasks, return_exceptions=True)
+        await stop.wait()
+        _LOG.info("shutdown signal received; stopping HTTP server")
+        server.should_exit = True
+        await http_task
+        _LOG.info("stopping agents")
     _LOG.info("clean exit")
     return 0
 
